@@ -2,11 +2,11 @@
 
 ## Visão
 
-Sparrow expõe um **MCP Server** (Model Context Protocol) que permite qualquer agente IA (Claude Code, Cursor, Copilot, etc.) controlar o cluster de containers diretamente.
+Sparrow expõe um **MCP Server** (Model Context Protocol) que permite qualquer agente IA (OpenCode, Cursor, Copilot, etc.) controlar o cluster de containers diretamente.
 
 ```
 ┌──────────────────┐     MCP Protocol     ┌──────────────────┐
-│  Claude Code     │◄────────────────────►│  Sparrow MCP     │
+│  OpenCode        │◄────────────────────►│  Sparrow MCP     │
 │  Cursor          │     stdio/HTTP       │  Server          │
 │  Copilot         │                      │                  │
 │  Qualquer MCP    │                      │  ┌────────────┐  │
@@ -491,15 +491,15 @@ Além de ferramentas, o MCP server expõe **prompts** para guiar a IA:
 
 ## Integração com Clientes
 
-### Claude Code (Skill)
+### OpenCode (Skill)
 
-```bash
-# Adicionar MCP server no opencode.json
+```json
+// ~/.config/opencode/opencode.json
 {
   "mcpServers": {
     "sparrow": {
       "command": "sparrow",
-      "args": ["mcp", "--port", "3000"],
+      "args": ["mcp"],
       "env": {
         "SPARROW_CLUSTER": "prod",
         "SPARROW_ENDPOINT": "http://localhost:7443"
@@ -509,10 +509,10 @@ Além de ferramentas, o MCP server expõe **prompts** para guiar a IA:
 }
 ```
 
-Depois no Claude Code:
+Depois no OpenCode:
 
 ```
-/oc-orchestrator (ou direto na skill Sparrow)
+/oc-orquestrador (ou direto no prompt)
 "sobe 3 nginx com auto-scaling, expõe porta 80"
 
 IA:
@@ -535,7 +535,7 @@ IA:
 }
 ```
 
-### Claude Desktop
+### Claude Desktop (ou outro MCP client)
 
 ```json
 {
@@ -557,7 +557,7 @@ Suporta dois transportes MCP:
 ```bash
 sparrow mcp
 # Lê JSON-RPC do stdin, escreve no stdout
-# Ideal: Claude Code, Cursor — spawn like a subprocess
+# Ideal: OpenCode, Cursor — spawn like a subprocess
 ```
 
 ### 2. HTTP Streamable (pra remoto)
@@ -648,26 +648,26 @@ O protocolo MCP é simples o bastante pra implementar na mão:
 ```mermaid
 sequenceDiagram
     participant User
-    participant Claude as Claude Code
+    participant OC as OpenCode
     participant SparrowMCP as Sparrow MCP Server
     participant SparrowAPI as Sparrow Core API
     participant Podman as Podman Runtime
     
-    User->>Claude: deploy 3 nginx com auto-scaling cpu 70%
+    User->>OC: deploy 3 nginx com auto-scaling cpu 70%
     
-    Claude->>SparrowMCP: tools/call {name: "create_service", args: {name: "web", image: "nginx:alpine", replicas: 3, ports: ["80:80"]}}
+    OC->>SparrowMCP: tools/call {name: "create_service", args: {name: "web", image: "nginx:alpine", replicas: 3, ports: ["80:80"]}}
     SparrowMCP->>SparrowAPI: POST /v1/services {name: "web", image: "nginx:alpine", replicas: 3, ports: [{published: 80, target: 80}]}
     SparrowAPI->>SparrowAPI: Raft log append
     SparrowAPI->>Podman: podman run -d --name web-1 nginx
     SparrowAPI->>Podman: podman run -d --name web-2 nginx
     SparrowAPI->>Podman: podman run -d --name web-3 nginx
     SparrowAPI-->>SparrowMCP: {id: "svc_abc", status: "running", replicas: 3}
-    SparrowMCP-->>Claude: Tool result: JSON
+    SparrowMCP-->>OC: Tool result: JSON
     
-    Claude->>SparrowMCP: tools/call {name: "configure_autoscaling", args: {service: "web", enabled: true, min: 2, max: 20, cpu_target: 70}}
+    OC->>SparrowMCP: tools/call {name: "configure_autoscaling", args: {service: "web", enabled: true, min: 2, max: 20, cpu_target: 70}}
     SparrowMCP->>SparrowAPI: POST /v1/services/svc_abc/autoscale {cpu_target: 70, min: 2, max: 20}
     SparrowAPI-->>SparrowMCP: {autoscaling: "configured"}
-    SparrowMCP-->>Claude: Tool result
+    SparrowMCP-->>OC: Tool result
     
-    Claude-->>User: ✅ 3 nginx rodando com auto-scaling ativo (cpu@70%, min=2, max=20)
+    OC-->>User: ✅ 3 nginx rodando com auto-scaling ativo (cpu@70%, min=2, max=20)
 ```

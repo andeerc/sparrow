@@ -52,6 +52,7 @@ Swarm (morto)                    K8s (complexo)
 
 ```
 docs/
+├── alerts.md               # Sistema de alertas (Telegram, Email, App)
 ├── architecture.md         # Arquitetura do sistema
 ├── auto-scaling.md         # Políticas de auto-scaling
 ├── cli-usage.md            # CLI commands reference

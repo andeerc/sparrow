@@ -21,6 +21,11 @@
 │                    │ (metrics →  │      │  (hyper + rustls)│           │
 │                    │  decision)  │      │  :80, :443       │           │
 │                    └─────────────┘      └──────────────────┘           │
+│                    ┌──────────────────┐                               │
+│                    │   Alert Module   │                               │
+│                    │ (Telegram, Email,│                               │
+│                    │  Webhook, App)   │                               │
+│                    └──────────────────┘                               │
 └──────────────────────────┬───────────────────────────────────────────┘
                            │ mTLS / gRPC
                            │
@@ -176,7 +181,26 @@ Porta 80/443 ──► Sparrow Proxy ──► Serviços
 - Zero-downtime config via API
 - Dispensa Nginx/Traefik/Envoy separados
 
-### 7. Autoscaler
+### 7. Sistema de Alertas
+
+Notificações em tempo real sobre eventos do cluster:
+
+```
+Eventos ──► Regras ──► Canais
+                        ├── Telegram
+                        ├── E-mail
+                        ├── Webhook (Slack, Discord, PagerDuty)
+                        ├── WebSocket (dashboard)
+                        └── Sparrow App (futuro, mobile)
+```
+
+- Eventos: node down, container crash, CPU alto, cert expirando, autoscale flapping
+- Regras customizáveis por severidade e canal
+- Cooldown anti-spam
+- Templates com variáveis do evento
+- Histórico persistente no SQLite
+
+### 8. Autoscaler
 
 Motor de decisão que avalia métricas e ajusta réplicas:
 

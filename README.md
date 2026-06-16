@@ -56,6 +56,7 @@ docs/
 ├── auto-scaling.md         # Políticas de auto-scaling
 ├── cli-usage.md            # CLI commands reference
 ├── mcp-server.md           # MCP Server pra controle por IA
+├── reverse-proxy.md        # Reverse proxy embutido (HTTP/HTTPS)
 ├── security.md             # Modelo de segurança
 ├── networking.md           # Overlay, DNS, load balancing
 ├── state-and-consensus.md  # Raft + SQLite

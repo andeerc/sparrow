@@ -3,25 +3,25 @@
 ## Visão Geral
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        CONTROL PLANE                             │
-│                                                                  │
-│  ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌───────────────┐ │
-│  │ CLI     │   │ API      │   │ Scheduler │   │ State Machine │ │
-│  │ (clap)  │──▶│ (axum)   │──▶│ (tokio)  │──▶│ (raft-rs)     │ │
-│  └─────────┘   └──────────┘   └──────────┘   └───────┬───────┘ │
-│                           │                           │          │
-│                    ┌──────┴──────┐           ┌────────┴────────┐ │
-│                    │ Reconciler  │           │   Cluster       │ │
-│                    │ (loop 10s)  │           │   Membership    │ │
-│                    └──────┬──────┘           └─────────────────┘ │
-│                           │                                        │
-│                    ┌──────┴──────┐                                 │
-│                    │ Autoscaler  │                                 │
-│                    │ (metrics →  │                                 │
-│                    │  decision)  │                                 │
-│                    └─────────────┘                                 │
-└──────────────────────────┬───────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        CONTROL PLANE                                     │
+│                                                                          │
+│  ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌───────────────┐         │
+│  │ CLI     │   │ API      │   │ Scheduler │   │ State Machine │         │
+│  │ (clap)  │──▶│ (axum)   │──▶│ (tokio)  │──▶│ (raft-rs)     │         │
+│  └─────────┘   └──────────┘   └──────────┘   └───────┬───────┘         │
+│                           │                           │                  │
+│                    ┌──────┴──────┐           ┌────────┴────────┐       │
+│                    │ Reconciler  │           │   Cluster       │       │
+│                    │ (loop 10s)  │           │   Membership    │       │
+│                    └──────┬──────┘           └─────────────────┘       │
+│                           │                                             │
+│                    ┌──────┴──────┐      ┌──────────────────┐           │
+│                    │ Autoscaler  │      │  Reverse Proxy   │           │
+│                    │ (metrics →  │      │  (hyper + rustls)│           │
+│                    │  decision)  │      │  :80, :443       │           │
+│                    └─────────────┘      └──────────────────┘           │
+└──────────────────────────┬───────────────────────────────────────────┘
                            │ mTLS / gRPC
                            │
         ┌──────────────────┼──────────────────┐
@@ -149,7 +149,34 @@ Consenso entre nós usando Raft:
 └─────────────────────────────────────────────┘
 ```
 
-### 6. Autoscaler
+### 6. Reverse Proxy
+
+Proxy HTTP/HTTPS embutido que roteia tráfego para os serviços gerenciados:
+
+```
+Porta 80/443 ──► Sparrow Proxy ──► Serviços
+                      │
+                  ┌───┴───┐
+                  │ TLS   │ (rustls, Let's Encrypt)
+                  ├───────┤
+                  │ Router│ (host + path)
+                  ├───────┤
+                  │ LB    │ (round-robin, least-conn, IP hash)
+                  ├───────┤
+                  │ Health│ (checks a cada 5s)
+                  ├───────┤
+                  │ Rate  │ (token bucket)
+                  └───────┘
+```
+
+- HTTP/1.1, HTTP/2, HTTPS (rustls)
+- Let's Encrypt automático
+- Roteamento por domínio e path
+- Rate limiting, sticky sessions, WebSocket, gRPC
+- Zero-downtime config via API
+- Dispensa Nginx/Traefik/Envoy separados
+
+### 7. Autoscaler
 
 Motor de decisão que avalia métricas e ajusta réplicas:
 

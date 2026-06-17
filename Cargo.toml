@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/podman",
+    "crates/proto",
+    "crates/raft",
+]
+
+[package]
+name = "sparrow"
+version = "0.1.0"
+edition = "2021"
+description = "Container orchestrator - simple as Swarm, safe as Podman, fast as Rust"
+
+[dependencies]
+sparrow-core = { path = "crates/core" }
+sparrow-podman = { path = "crates/podman" }
+sparrow-proto = { path = "crates/proto" }
+sparrow-raft = { path = "crates/raft" }
+
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+anyhow = "1"
+dirs = "5"

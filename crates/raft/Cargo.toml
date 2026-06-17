@@ -1,0 +1,10 @@
+[package]
+name = "sparrow-raft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sparrow-proto = { path = "../proto" }
+
+tracing = "0.1"
+anyhow = "1"

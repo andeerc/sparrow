@@ -1,27 +1,31 @@
 # Plano de Implementação — Sparrow
 
+**Status atual:** Fase 0 (Foundation) ✅ Completa
+
 ## Estratégia
 
 Construir em camadas, cada fase entregando algo **funcional e testável**. Nada de passar meses codando sem ver resultado.
 
 ```
-Fase 0 ──► Fundação (Cargo init, types, CLI, config)
+Fase 0 ──► Fundação (Cargo init, types, CLI, config) ✅ COMPLETA
    │
    ▼
-Fase 1 ──► Single-node MVP (Podman runtime, services, SQLite)
-   │         ├── sparrow create/scale/rm/ls
-   │         └── sparrow ps, sparrow logs
+Fase 1 ──► Single-node MVP (Podman runtime, services, SQLite) 🔶 PARCIAL
+   │         ├── sparrow create/scale/rm/ls ✅
+   │         ├── sparrow ps, sparrow logs ✅
+   │         ├── health check loop 🔶 Pendente
+   │         └── deploy YAML 🔶 Pendente
    ▼
-Fase 2 ──► Multi-node (Raft, cluster join/leave, mTLS)
+Fase 2 ──► Multi-node (Raft, cluster join/leave, mTLS) ❌
    │         ├── sparrow cluster init/join
    │         └── sparrow node ls
    ▼
-Fase 3 ──► Produção (Reverse proxy, autoscaling, health checks)
+Fase 3 ──► Produção (Reverse proxy, autoscaling, health checks) ❌
    │         ├── proxy HTTP/HTTPS
    │         ├── autoscaling CPU/memory
    │         └── rolling updates
    ▼
-Fase 4 ──► Maturidade (MCP server, alerts, preditivo, dashboard)
+Fase 4 ──► Maturidade (MCP server, alerts, preditivo, dashboard) ❌
              ├── Controle por IA
              ├── Alertas (Telegram, Email)
              └── Sparrow App (mobile)

@@ -949,12 +949,13 @@ fn print_box(title: &str, rows: &[(&str, &str)]) {
         if line_w > min_w { min_w = line_w; }
     }
     let w = min_w.max(40).min(72);
+    let val_w = w.saturating_sub(label_w + 5); // 5 = "│ " + "  " + " │"
 
     println!("┌{}┐", "─".repeat(w));
     println!("│{:^w$}│", format!(" {} ", title));
     println!("├{}┤", "─".repeat(w));
     for (label, val) in rows {
-        println!("│ {:>label_w$}  {} │", label, val);
+        println!("│ {:>label_w$}  {:<val_w$} │", label, val);
     }
     println!("└{}┘", "─".repeat(w));
 }

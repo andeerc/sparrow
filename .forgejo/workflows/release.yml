@@ -6,9 +6,16 @@ on:
 
 jobs:
   release:
-    runs-on: docker
+    runs-on: ubuntu-22.04
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq curl build-essential
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       # ── Build Rust binary ──
       - name: Build binary

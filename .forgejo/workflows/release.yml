@@ -6,7 +6,9 @@ on:
 
 jobs:
   release:
-    runs-on: host
+    runs-on: docker
+    container:
+      options: -v /var/run/docker.sock:/var/run/docker.sock
     steps:
       - name: Checkout
         env:
@@ -16,6 +18,11 @@ jobs:
           git remote add origin https://andeerc:${FORGEJO_TOKEN}@codeberg.org/andeerc/sparrow.git
           git fetch origin --depth 1 ${GITHUB_REF_NAME}
           git checkout FETCH_HEAD
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       # ── Build Rust binary ──
       - name: Build binary

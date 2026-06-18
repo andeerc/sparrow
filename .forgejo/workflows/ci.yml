@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-22.04
+    runs-on: docker
     steps:
       - name: Checkout
         env:
@@ -21,8 +21,6 @@ jobs:
 
       - name: Install Rust
         run: |
-          apt-get update -qq
-          apt-get install -y -qq curl build-essential
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 

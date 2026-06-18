@@ -104,19 +104,12 @@ impl PodmanRuntime {
         Ok(())
     }
 
-    /// Get container logs
-    pub async fn logs(&self, name: &str, tail: u32, follow: bool) -> anyhow::Result<Vec<String>> {
-        let mut cmd = tokio::process::Command::new("podman");
-        cmd.arg("logs");
-
-        if follow {
-            cmd.arg("--follow");
-        }
-
-        cmd.arg("--tail").arg(tail.to_string());
-        cmd.arg(name);
-
-        let output = cmd.output().await?;
+    /// Get container logs (non-following, returns all lines)
+    pub async fn logs(&self, name: &str, tail: u32) -> anyhow::Result<Vec<String>> {
+        let output = tokio::process::Command::new("podman")
+            .args(["logs", "--tail", &tail.to_string(), name])
+            .output()
+            .await?;
 
         if !output.status.success() {
             return Ok(vec![]);
@@ -124,6 +117,52 @@ impl PodmanRuntime {
 
         let logs = String::from_utf8_lossy(&output.stdout);
         Ok(logs.lines().map(|l| l.to_string()).collect())
+    }
+
+    /// Stream container logs in real-time (follow mode).
+    /// Spawns podman logs --follow and sends each line through the sender.
+    /// Caller should cancel via the child handle when done.
+    pub async fn logs_follow(
+        &self,
+        name: &str,
+        tail: u32,
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> anyhow::Result<tokio::process::Child> {
+        let mut child = tokio::process::Command::new("podman")
+            .args(["logs", "--follow", "--tail", &tail.to_string(), name])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        // Read stdout
+        let tx1 = tx.clone();
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stdout);
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tx1.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Read stderr
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stderr);
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tx.send(format!("[stderr] {line}")).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(child)
     }
 
     /// Inspect container status

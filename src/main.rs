@@ -1,6 +1,8 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use clap::Parser;
+use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
 use sparrow_core::cli::{Cli, Command, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction};
@@ -38,9 +40,9 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
 
     let db_path = data_dir.join("sparrow.db");
-    let state = StateStore::new(db_path.to_str().unwrap())?;
+    let state = Arc::new(StateStore::new(db_path.to_str().unwrap())?);
 
-    let runtime = PodmanRuntime::new(config.runtime.rootless);
+    let runtime = Arc::new(PodmanRuntime::new(config.runtime.rootless));
 
     // Check podman availability
     let podman_ok = match runtime.check_available().await {
@@ -49,9 +51,18 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => { tracing::warn!("Podman check: {}", e); false }
     };
 
+    if podman_ok {
+        let hc_state = Arc::clone(&state);
+        let hc_runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            health_check_loop(hc_state, hc_runtime).await;
+        });
+    }
+
+    let mut cluster_state: Option<sparrow_api::SharedAppState> = None;
+
     match cli.command {
-        // ── Cluster Commands (Fase 2) ──
-        Command::Cluster { action } => handle_cluster(action, &state, &config).await?,
+        Command::Cluster { action } => handle_cluster(action, &state, &config, &mut cluster_state).await?,
 
         // ── Service Commands ──
         Command::Service { action } => handle_service(action, &state, &runtime, &data_dir, podman_ok).await?,
@@ -75,7 +86,52 @@ async fn main() -> anyhow::Result<()> {
 
         // ── Deploy (Fase 3) ──
         Command::Deploy { file } => {
-            println!("⚠️  Deploy from '{file}' — Fase 3, not yet implemented");
+            match sparrow_core::deploy::DeployManifest::from_file(&file) {
+                Ok(manifest) => {
+                    let spec = manifest.to_service_spec();
+                    println!("📦 Deploying '{}' ({} replicas of {})...", spec.name, spec.desired_replicas, spec.image);
+
+                    if !podman_ok {
+                        eprintln!("❌ Podman not available");
+                        return Ok(());
+                    }
+
+                    // Persist to state store
+                    state.create_service(&spec)?;
+                    println!("📦 Service '{}' ({}) created", spec.name, spec.id);
+
+                    // Run containers
+                    let mut success = 0u32;
+                    for i in 1..=spec.desired_replicas {
+                        let cname = format!("{}-{}", spec.name, i);
+                        let ports: Vec<PortMapping> = spec.ports.clone();
+                        let env_refs: Vec<(String, String)> = spec.env.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
+                        match runtime.run_container(&cname, &spec.image, &ports, &env_refs, &std::collections::HashMap::new()).await {
+                            Ok(cid) => {
+                                state.record_container(&cname, &spec.id, &spec.image, i, "Running")?;
+                                println!("  ✅ {cname} -> {cid:.12}");
+                                success += 1;
+                            }
+                            Err(e) => {
+                                state.record_container(&cname, &spec.id, &spec.image, i, "Failed")?;
+                                eprintln!("  ❌ {cname}: {e}");
+                            }
+                        }
+                    }
+
+                    // Configure autoscale if specified
+                    if let Some(as_config) = &spec.autoscaling {
+                        state.set_autoscale(&spec.id, as_config, false)?;
+                        println!("📊 Autoscale configured: min={} max={} cpu={}% mem={}%",
+                            as_config.min_replicas, as_config.max_replicas,
+                            as_config.cpu_target_percent.map_or("-".to_string(), |v| v.to_string()),
+                            as_config.memory_target_percent.map_or("-".to_string(), |v| v.to_string()));
+                    }
+
+                    println!("🎯 Deploy complete: {}/{} replicas running", success, spec.desired_replicas);
+                }
+                Err(e) => eprintln!("❌ Deploy failed: {e}"),
+            }
         }
 
         // ── Status ──
@@ -98,23 +154,61 @@ async fn main() -> anyhow::Result<()> {
 
 // ── Cluster Handler ──
 
-async fn handle_cluster(action: ClusterAction, _state: &StateStore, _config: &SparrowConfig) -> anyhow::Result<()> {
+async fn handle_cluster(
+    action: ClusterAction,
+    _state: &StateStore,
+    _config: &SparrowConfig,
+    cluster_state: &mut Option<sparrow_api::SharedAppState>,
+) -> anyhow::Result<()> {
     match action {
         ClusterAction::Init { name, listen } => {
-            println!("🔧 Initializing cluster '{name}' on {listen}...");
-            println!("⚠️  Cluster init — Fase 2");
+            let addr = if listen.is_empty() { "0.0.0.0:7443" } else { &listen };
+            println!("🔧 Initializing cluster '{name}' on {addr}...");
+
+            let app_state = sparrow_api::init_cluster(&name, "localhost", addr);
+            let cs_clone = app_state.clone();
+            let listen_addr = addr.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = sparrow_api::start_api(cs_clone, &listen_addr).await {
+                    tracing::error!("API server failed: {e}");
+                }
+            });
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            println!("✅ Cluster '{name}' initialized. API listening on {addr}");
+            println!("   Join token: sparrow-{}-tok-{:x}", name, name.len());
+            *cluster_state = Some(app_state);
         }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");
-            println!("⚠️  Cluster join — Fase 2");
+            println!("⚠️  Full join protocol — Raft consensus (Fase 2)");
         }
         ClusterAction::Status => {
-            println!("📊 Cluster: single-node mode (no peers)");
-            println!("   To form a multi-node cluster, use: sparrow cluster init");
+            match cluster_state {
+                Some(cs) => {
+                    let cluster = cs.cluster.read().await;
+                    println!("📊 Cluster: '{}' ({} nodes)", cluster.name, cluster.nodes.len());
+                    for node in cluster.nodes.values() {
+                        println!("   {} @ {} — {} ({})", node.name, node.addr, node.role, node.status);
+                    }
+                }
+                None => {
+                    println!("📊 Cluster: single-node mode (no peers)");
+                    println!("   To form a multi-node cluster, use: sparrow cluster init");
+                }
+            }
         }
         ClusterAction::Members => {
-            println!("📋 Cluster members:");
-            println!("   localhost (self) — Leader");
+            match cluster_state {
+                Some(cs) => {
+                    let cluster = cs.cluster.read().await;
+                    println!("📋 Cluster members:");
+                    for node in cluster.nodes.values() {
+                        println!("   {} ({}) — {} — {}", node.id, node.name, node.role, node.status);
+                    }
+                }
+                None => println!("📋 Cluster members:\n   localhost (self) — Leader"),
+            }
         }
     }
     Ok(())
@@ -329,18 +423,45 @@ async fn handle_service(
                 return Ok(());
             }
 
-            for c in &containers {
-                if c.state != ContainerState::Running && !follow {
-                    continue;
-                }
-                let prefix = if containers.len() > 1 { format!("[{}] ", c.name) } else { String::new() };
-                match runtime.logs(&c.name, tail, follow).await {
-                    Ok(lines) => {
-                        for line in &lines {
-                            println!("{prefix}{line}");
+            if follow {
+                let mut children = Vec::new();
+                for c in &containers {
+                    if c.state != ContainerState::Running { continue; }
+                    let prefix = if containers.len() > 1 { format!("[{}] ", c.name) } else { String::new() };
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                    match runtime.logs_follow(&c.name, tail, tx).await {
+                        Ok(child) => {
+                            children.push(child);
+                            tokio::spawn(async move {
+                                while let Some(line) = rx.recv().await {
+                                    println!("{prefix}{line}");
+                                }
+                            });
                         }
+                        Err(e) => eprintln!("{prefix}Error: {e}"),
                     }
-                    Err(e) => eprintln!("{prefix}Error: {e}"),
+                }
+
+                if children.is_empty() {
+                    return Ok(());
+                }
+
+                let _ = tokio::signal::ctrl_c().await;
+                for mut child in children {
+                    let _ = child.start_kill();
+                }
+            } else {
+                for c in &containers {
+                    if c.state != ContainerState::Running { continue; }
+                    let prefix = if containers.len() > 1 { format!("[{}] ", c.name) } else { String::new() };
+                    match runtime.logs(&c.name, tail).await {
+                        Ok(lines) => {
+                            for line in &lines {
+                                println!("{prefix}{line}");
+                            }
+                        }
+                        Err(e) => eprintln!("{prefix}Error: {e}"),
+                    }
                 }
             }
         }
@@ -527,6 +648,69 @@ async fn handle_alert(action: AlertAction) -> anyhow::Result<()> {
 }
 
 // ── Helpers ──
+
+async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) {
+    loop {
+        sleep(Duration::from_secs(30)).await;
+        let services = match state.list_services() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Health check: failed to list services: {e}");
+                continue;
+            }
+        };
+
+        for svc in &services {
+            let containers = match runtime.list_containers(&svc.name).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Check if we have the right number of running containers
+            let running = containers.iter().filter(|c| c.state == ContainerState::Running).count();
+            let desired = svc.desired_replicas as usize;
+
+            // Restart failed containers
+            for c in &containers {
+                if c.state == ContainerState::Exited || c.state == ContainerState::Crashed {
+                    tracing::warn!("Health: {} is {:?}, restarting...", c.name, c.state);
+                    if let Err(e) = runtime.remove_container(&c.name).await {
+                        tracing::error!("Health: failed to remove {}: {e}", c.name);
+                        continue;
+                    }
+                    let port_refs: Vec<PortMapping> = svc.ports.clone();
+                    match runtime.run_container(&c.name, &svc.image, &port_refs, &[], &std::collections::HashMap::new()).await {
+                        Ok(cid) => {
+                            if let Err(e) = state.record_container(&c.name, &svc.id, &svc.image, containers.len() as u32 + 1, "Running") {
+                                tracing::error!("Health: failed to record {}: {e}", c.name);
+                            }
+                            tracing::info!("Health: restarted {} -> {:.12}", c.name, cid);
+                        }
+                        Err(e) => {
+                            tracing::error!("Health: failed to restart {}: {e}", c.name);
+                        }
+                    }
+                }
+            }
+
+            // Scale up if missing replicas
+            if running < desired {
+                tracing::warn!("Health: {} has {}/{} replicas, scaling up...", svc.name, running, desired);
+                for i in (running + 1)..=desired {
+                    let cname = format!("{}-{}", svc.name, i);
+                    let port_refs: Vec<PortMapping> = svc.ports.clone();
+                    match runtime.run_container(&cname, &svc.image, &port_refs, &[], &std::collections::HashMap::new()).await {
+                        Ok(cid) => {
+                            let _ = state.record_container(&cname, &svc.id, &svc.image, i as u32, "Running");
+                            tracing::info!("Health: scaled up {} -> {:.12}", cname, cid);
+                        }
+                        Err(e) => tracing::error!("Health: scale up failed {}: {e}", cname),
+                    }
+                }
+            }
+        }
+    }
+}
 
 fn format_cpu(cpu: f64) -> String {
     if cpu == 0.0 { "-".to_string() } else { format!("{:.1}%", cpu) }

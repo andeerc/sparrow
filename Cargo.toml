@@ -5,6 +5,7 @@ members = [
     "crates/podman",
     "crates/proto",
     "crates/raft",
+    "crates/api",
 ]
 
 [package]
@@ -18,6 +19,7 @@ sparrow-core = { path = "crates/core" }
 sparrow-podman = { path = "crates/podman" }
 sparrow-proto = { path = "crates/proto" }
 sparrow-raft = { path = "crates/raft" }
+sparrow-api = { path = "crates/api" }
 
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

@@ -1,20 +1,23 @@
 //! # sparrow-core
 //!
-//! Núcleo do Sparrow: CLI, config, error handling e state store SQLite.
+//! Núcleo do Sparrow: CLI, config, error handling, state store SQLite e deploy YAML.
 //!
 //! ## Módulos
 //!
 //! - `cli` — Definição de todos os comandos CLI via clap derive
 //! - `config` — Carregamento de configuração YAML (/etc/sparrow/sparrow.yaml)
+//! - `deploy` — Parser de manifests YAML para deploy declarativo
 //! - `error` — Sistema de erros tipado com thiserror
 //! - `state` — State store SQLite (WAL mode) para serviços, containers, autoscale
 
 pub mod cli;
 pub mod config;
+pub mod deploy;
 pub mod error;
 pub mod state;
 
 pub use cli::*;
 pub use config::*;
+pub use deploy::*;
 pub use error::*;
 pub use state::*;

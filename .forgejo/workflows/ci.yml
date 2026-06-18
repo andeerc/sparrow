@@ -10,7 +10,14 @@ jobs:
   build-and-test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          git init -q
+          git remote add origin https://andeerc:${FORGEJO_TOKEN}@codeberg.org/andeerc/sparrow.git
+          git fetch origin --depth 1 ${GITHUB_REF_NAME}
+          git checkout FETCH_HEAD
 
       - name: Install Rust
         run: |

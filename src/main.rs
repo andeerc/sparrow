@@ -146,15 +146,14 @@ async fn main() -> anyhow::Result<()> {
         // ── Status ──
         Command::Status => {
             let services = state.list_services().unwrap_or_default();
-            println!("╔══════════════════════════════════════╗");
-            println!("║     Sparrow Cluster Status          ║");
-            println!("╠══════════════════════════════════════╣");
-            println!("║  Mode:       Single-node             ║");
-            println!("║  Podman:     {}                    ║", if podman_ok { "✓" } else { "✗" });
-            println!("║  Data:       {}  ║", data_dir.display());
-            println!("║  Services:   {}                     ║", services.len());
-            println!("║  Raft:       Stopped (Fase 2)        ║");
-            println!("╚══════════════════════════════════════╝");
+            let podman_status = if podman_ok { "✓ available" } else { "✗ not found" };
+            print_box("Sparrow Cluster Status", &[
+                ("Mode",     "Single-node"),
+                ("Podman",   podman_status),
+                ("Data",     &data_dir.display().to_string()),
+                ("Services", &services.len().to_string()),
+                ("Raft",     "Stopped (single-node)"),
+            ]);
         }
     }
 
@@ -328,11 +327,14 @@ async fn handle_service(
                 return Ok(());
             }
 
-            println!("{:<24} {:<28} {:<10} {:<20}", "NAME", "IMAGE", "REPLICAS", "CREATED");
-            println!("{}", "-".repeat(82));
-            for svc in &services {
-                println!("{:<24} {:<28} {:<10} {:<20}", svc.name, svc.image, svc.desired_replicas, svc.created_at.format("%Y-%m-%d %H:%M"));
-            }
+            print_table(&["NAME", "IMAGE", "REPLICAS", "CREATED"], services.iter().map(|s| {
+                vec![
+                    s.name.clone(),
+                    s.image.clone(),
+                    s.desired_replicas.to_string(),
+                    s.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                ]
+            }).collect());
         }
 
         ServiceAction::Ps { name } => {
@@ -344,15 +346,19 @@ async fn handle_service(
                     if containers.is_empty() {
                         println!("📭 No containers for service '{}'", s.name);
                     } else {
-                        println!("{:<20} {:<10} {:<10} {:<16}", "CONTAINER", "STATUS", "CPU", "MEM");
-                        println!("{}", "-".repeat(56));
+                        let mut rows: Vec<Vec<String>> = Vec::new();
                         for c in &containers {
                             let (cpu, mem) = if c.state == ContainerState::Running {
                                 runtime.stats(&c.name).await.unwrap_or((0.0, 0))
                             } else { (0.0, 0) };
-                            let mem_str = if mem > 0 { format_bytes(mem) } else { "-".to_string() };
-                            println!("{:<20} {:<10} {:<10} {:<16}", c.name, c.state.to_string(), format_cpu(cpu), mem_str);
+                            rows.push(vec![
+                                c.name.clone(),
+                                c.state.to_string(),
+                                format_cpu(cpu),
+                                if mem > 0 { format_bytes(mem) } else { "-".to_string() },
+                            ]);
                         }
+                        print_table(&["CONTAINER", "STATUS", "CPU", "MEM"], rows);
                     }
                 }
                 None => eprintln!("❌ Service '{name}' not found"),
@@ -580,14 +586,16 @@ async fn handle_network(action: NetworkAction) -> anyhow::Result<()> {
                 .args(["network", "ls", "--format", "{{.Name}}\t{{.Driver}}\t{{.Subnet}}"])
                 .output().await?;
             let stdout = String::from_utf8_lossy(&out.stdout);
-            println!("{:<24} {:<10} {:<20}", "NAME", "DRIVER", "SUBNET");
-            println!("{}", "-".repeat(54));
-            for line in stdout.lines().filter(|l| !l.is_empty()) {
+            let rows: Vec<Vec<String>> = stdout.lines().filter(|l| !l.is_empty()).map(|line| {
                 let parts: Vec<&str> = line.split('\t').collect();
-                let name = parts.first().unwrap_or(&"");
-                let driver = parts.get(1).unwrap_or(&"");
-                let subnet = parts.get(2).unwrap_or(&"");
-                println!("{:<24} {:<10} {:<20}", name, driver, subnet);
+                vec![
+                    parts.first().unwrap_or(&"").to_string(),
+                    parts.get(1).unwrap_or(&"").to_string(),
+                    parts.get(2).unwrap_or(&"").to_string(),
+                ]
+            }).collect();
+            if !rows.is_empty() {
+                print_table(&["NAME", "DRIVER", "SUBNET"], rows);
             }
         }
         NetworkAction::Rm { name } => {
@@ -765,3 +773,51 @@ fn format_bytes(bytes: u64) -> String {
     }
     format!("{:.1}TiB", v * 1024.0)
 }
+
+fn print_box(title: &str, rows: &[(&str, &str)]) {
+    let label_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(8);
+    let mut min_w = title.len() + 4;
+    for (l, v) in rows {
+        let line_w = l.len() + 2 + v.len();
+        if line_w > min_w { min_w = line_w; }
+    }
+    let w = min_w.max(40).min(72);
+
+    println!("┌{}┐", "─".repeat(w));
+    println!("│{:^w$}│", format!(" {} ", title));
+    println!("├{}┤", "─".repeat(w));
+    for (label, val) in rows {
+        println!("│ {:>label_w$}  {} │", label, val);
+    }
+    println!("└{}┘", "─".repeat(w));
+}
+
+fn print_table(headers: &[&str], rows: Vec<Vec<String>>) {
+    let n = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate().take(n) {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+    let render = |cells: &[String], align: fn(usize) -> char| -> String {
+        cells.iter().enumerate().map(|(i, c)| {
+            let w = widths[i];
+            if align(i) == '^' { format!(" {:^w$} ", c) }
+            else { format!(" {:<w$} ", c) }
+        }).collect::<Vec<_>>().join("│")
+    };
+    let top = format!("┌{}┐", widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┬"));
+    let sep = format!("├{}┤", widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┼"));
+    let bot = format!("└{}┘", widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┴"));
+    let hdr: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
+
+    println!("{top}");
+    println!("│{}│", render(&hdr, |_| '^'));
+    println!("{sep}");
+    for row in &rows {
+        println!("│{}│", render(row, |_| '<'));
+    }
+    println!("{bot}");
+}
+

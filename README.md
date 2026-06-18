@@ -174,11 +174,40 @@ logging:
   format: plain
 ```
 
+## Instalação
+
+### Docker (Codeberg Packages)
+
+```bash
+docker pull codeberg.org/andeerc/sparrow:latest
+docker run --rm codeberg.org/andeerc/sparrow:latest --help
+```
+
+### Binário (Releases)
+
+Baixe o binário da [última release](https://codeberg.org/andeerc/sparrow/releases):
+
+```bash
+# Linux x86_64
+curl -L -o sparrow https://codeberg.org/andeerc/sparrow/releases/download/v0.1.0/sparrow-v0.1.0-x86_64-linux
+chmod +x sparrow
+sudo mv sparrow /usr/local/bin/
+```
+
+### Compilando da fonte
+
+```bash
+git clone https://codeberg.org/andeerc/sparrow.git
+cd sparrow
+cargo build --release
+sudo cp target/release/sparrow /usr/local/bin/
+```
+
 ## Quickstart
 
 ```bash
-# Build
-cargo build --release
+# Ver instalação
+sparrow --help
 
 # Check podman
 podman --version

@@ -209,6 +209,15 @@ impl AutoscaleEngine {
                                         "Running",
                                     )
                                     .ok();
+                                self.store
+                                    .record_autoscale_event(
+                                        &svc.id,
+                                        "scale_up",
+                                        svc.desired_replicas,
+                                        new_replicas,
+                                        &format!("cpu {:.1}% > target {:.0}%", metrics.avg_cpu, config.cpu_target_percent.unwrap_or(0.0)),
+                                    )
+                                    .ok();
                                 self.last_action
                                     .lock()
                                     .await
@@ -235,6 +244,15 @@ impl AutoscaleEngine {
                                     .ok();
                                 self.store
                                     .update_container_state(&container_name, "Exited")
+                                    .ok();
+                                self.store
+                                    .record_autoscale_event(
+                                        &svc.id,
+                                        "scale_down",
+                                        svc.desired_replicas,
+                                        new_replicas,
+                                        &format!("cpu {:.1}% < threshold {:.0}%", metrics.avg_cpu, config.cpu_target_percent.unwrap_or(0.0) * 0.7),
+                                    )
                                     .ok();
                                 self.last_action
                                     .lock()

@@ -1,21 +1,32 @@
 use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::sync::Arc;
 
+use openraft::type_config::alias::{SnapshotMetaOf, VoteOf};
 use openraft::{Config, Raft, BasicNode};
-use openraft::async_runtime::WatchReceiver;
+use openraft::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse, SnapshotResponse,
+};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::network::NetworkFactory;
+use crate::network::{NetworkFactory, TlsConfig};
 use crate::storage::{StoredRaftLog, StoredStateMachine, TypeConfig};
 
-/// Concrete Raft type with our storage + state machine.
 pub type RaftNode = Raft<TypeConfig, StoredStateMachine>;
 
-/// Manages a Raft consensus node for the Sparrow cluster.
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotWire {
+    pub vote: VoteOf<TypeConfig>,
+    pub meta: SnapshotMetaOf<TypeConfig>,
+    pub data: Vec<u8>,
+}
+
 pub struct RaftCluster {
     raft: RwLock<Option<RaftNode>>,
-    node_id: u64,
-    listen_addr: String,
+    pub node_id: u64,
+    pub listen_addr: String,
+    tls: Option<TlsConfig>,
 }
 
 impl RaftCluster {
@@ -24,11 +35,19 @@ impl RaftCluster {
             raft: RwLock::new(None),
             node_id,
             listen_addr: listen_addr.to_string(),
+            tls: None,
         }
     }
 
-    /// Bootstrap this node as the first leader in a new cluster.
-    /// Creates Raft storage, network, and calls initialize() to form singleton cluster.
+    pub fn with_tls(node_id: u64, listen_addr: &str, tls: TlsConfig) -> Self {
+        Self {
+            raft: RwLock::new(None),
+            node_id,
+            listen_addr: listen_addr.to_string(),
+            tls: Some(tls),
+        }
+    }
+
     pub async fn init(&self) -> anyhow::Result<()> {
         let config = Arc::new(Config {
             heartbeat_interval: 500,
@@ -42,7 +61,7 @@ impl RaftCluster {
             StoredRaftLog::new(&format!("/tmp/sparrow-{}-raft-log.db", self.node_id))?;
         let state_machine =
             StoredStateMachine::new(&format!("/tmp/sparrow-{}-raft-sm.db", self.node_id))?;
-        let network = NetworkFactory;
+        let network = NetworkFactory { tls: self.tls.clone() };
 
         let raft = RaftNode::new(self.node_id, config, network, log_store, state_machine)
             .await
@@ -59,8 +78,6 @@ impl RaftCluster {
         Ok(())
     }
 
-    /// Start this node and join an existing cluster at `leader_addr`.
-    /// Creates a local Raft instance that will connect to the leader.
     pub async fn join(&self, leader_addr: &str) -> anyhow::Result<()> {
         let config = Arc::new(Config {
             heartbeat_interval: 500,
@@ -74,7 +91,7 @@ impl RaftCluster {
             StoredRaftLog::new(&format!("/tmp/sparrow-{}-raft-log.db", self.node_id))?;
         let state_machine =
             StoredStateMachine::new(&format!("/tmp/sparrow-{}-raft-sm.db", self.node_id))?;
-        let network = NetworkFactory;
+        let network = NetworkFactory { tls: self.tls.clone() };
 
         let raft = RaftNode::new(self.node_id, config, network, log_store, state_machine)
             .await
@@ -85,17 +102,55 @@ impl RaftCluster {
         Ok(())
     }
 
-    /// Current leader node ID, if known.
     pub async fn current_leader(&self) -> Option<u64> {
-        self.raft
-            .read()
-            .await
-            .as_ref()
-            .and_then(|r| r.metrics().borrow_watched().current_leader)
+        let guard = self.raft.read().await;
+        match guard.as_ref() {
+            Some(raft) => raft.current_leader().await,
+            None => None,
+        }
     }
 
-    /// Whether the Raft node has been initialized.
     pub async fn is_initialized(&self) -> bool {
         self.raft.read().await.is_some()
+    }
+
+    pub async fn handle_append_entries(
+        &self,
+        rpc: AppendEntriesRequest<TypeConfig>,
+    ) -> anyhow::Result<AppendEntriesResponse<TypeConfig>> {
+        let guard = self.raft.read().await;
+        match guard.as_ref() {
+            Some(raft) => Ok(raft.append_entries(rpc).await?),
+            None => anyhow::bail!("Raft not initialized"),
+        }
+    }
+
+    pub async fn handle_vote(
+        &self,
+        rpc: VoteRequest<TypeConfig>,
+    ) -> anyhow::Result<VoteResponse<TypeConfig>> {
+        let guard = self.raft.read().await;
+        match guard.as_ref() {
+            Some(raft) => Ok(raft.vote(rpc).await?),
+            None => anyhow::bail!("Raft not initialized"),
+        }
+    }
+
+    pub async fn handle_snapshot(
+        &self,
+        wire: SnapshotWire,
+    ) -> anyhow::Result<SnapshotResponse<TypeConfig>> {
+        let guard = self.raft.read().await;
+        match guard.as_ref() {
+            Some(raft) => {
+                let snapshot = openraft::Snapshot {
+                    meta: wire.meta,
+                    snapshot: Cursor::new(wire.data),
+                };
+                let resp = raft.install_full_snapshot(wire.vote, snapshot).await?;
+                Ok(resp)
+            }
+            None => anyhow::bail!("Raft not initialized"),
+        }
     }
 }

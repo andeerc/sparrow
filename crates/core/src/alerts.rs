@@ -1,4 +1,5 @@
 use serde_json;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -6,6 +7,8 @@ use tracing::{error, info, warn};
 use lettre::message::Message;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+
+use crate::state::StateStore;
 
 pub struct AlertEvent {
     pub id: String,
@@ -28,11 +31,12 @@ pub struct AlertChannel {
 pub struct AlertDispatch {
     rx: tokio::sync::mpsc::Receiver<AlertEvent>,
     channels: Vec<AlertChannel>,
+    state: Arc<StateStore>,
 }
 
 impl AlertDispatch {
-    pub fn new(rx: tokio::sync::mpsc::Receiver<AlertEvent>, channels: Vec<AlertChannel>) -> Self {
-        Self { rx, channels }
+    pub fn new(rx: tokio::sync::mpsc::Receiver<AlertEvent>, channels: Vec<AlertChannel>, state: Arc<StateStore>) -> Self {
+        Self { rx, channels, state }
     }
 
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
@@ -68,19 +72,30 @@ impl AlertDispatch {
                 continue;
             }
 
-            for channel in matching {
+            for channel in &matching {
                 let event = event.clone_for_dispatch();
                 let channel_id = channel.id.clone();
                 let channel_type = channel.channel_type.clone();
                 let config = channel.config.clone();
 
-                let result = dispatch_with_retry(channel_type, &config, &event).await;
+                let result = dispatch_with_retry(channel_type.clone(), &config, &event).await;
                 match result {
-                    Ok(()) => info!(
-                        channel_id = %channel_id,
-                        event_id = %event.id,
-                        "alert dispatched successfully"
-                    ),
+                    Ok(()) => {
+                        info!(
+                            channel_id = %channel_id,
+                            event_id = %event.id,
+                            "alert dispatched successfully"
+                        );
+                        let _ = self.state.record_alert_event(
+                            &channel_id,
+                            &channel_type,
+                            &event.metric,
+                            event.value,
+                            event.threshold,
+                            &event.message,
+                            &event.severity,
+                        );
+                    }
                     Err(e) => error!(
                         channel_id = %channel_id,
                         event_id = %event.id,

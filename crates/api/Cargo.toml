@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 sparrow-raft = { path = "../raft" }
 axum = { version = "0.7", features = ["macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -15,3 +16,4 @@ hyper = { version = "1", features = ["client", "http1", "http2"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 bytes = "1"
+bincode = "1"

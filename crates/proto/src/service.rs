@@ -107,6 +107,27 @@ pub struct AutoscalingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoscaleEvent {
+    pub decision: String,
+    pub replicas_from: u32,
+    pub replicas_to: u32,
+    pub reason: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertRule {
+    pub id: String,
+    pub name: String,
+    pub metric: String,
+    pub operator: String,
+    pub threshold: f64,
+    pub duration_secs: i32,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStatus {
     pub id: String,
     pub name: String,
@@ -152,4 +173,27 @@ impl std::fmt::Display for ContainerState {
             Self::Unknown => write!(f, "Unknown"),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertEventRecord {
+    pub channel_id: String,
+    pub channel_type: String,
+    pub metric: String,
+    pub value: f64,
+    pub threshold: f64,
+    pub message: String,
+    pub severity: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertChannelRecord {
+    pub id: String,
+    pub channel_type: String,
+    pub name: String,
+    pub config_json: String,
+    pub enabled: bool,
+    pub created_at: String,
 }

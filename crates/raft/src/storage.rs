@@ -15,6 +15,7 @@ use openraft::{
     OptionalSend, Snapshot, StoredMembership,
 };
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 
 use crate::types::{RaftRequest, RaftResponse};
 
@@ -266,14 +267,65 @@ impl StoredStateMachine {
     }
 }
 
-pub struct SnapshotBuilder;
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotState {
+    pub last_applied_term: u64,
+    pub last_applied_index: u64,
+    pub last_applied_leader_node_id: u64,
+    pub membership_term: u64,
+    pub membership_node_ids: Vec<u64>,
+}
+
+pub struct SnapshotBuilder {
+    pub db: Arc<Mutex<Connection>>,
+    pub last_applied: Arc<Mutex<Option<LE>>>,
+    pub last_membership: Arc<Mutex<StoredM>>,
+}
 
 impl RaftSnapshotBuilder<C> for SnapshotBuilder {
     async fn build_snapshot(&mut self) -> Result<SO, io::Error> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "snapshot building not implemented",
-        ))
+        let la = self.last_applied.lock().unwrap().clone();
+        let membership = self.last_membership.lock().unwrap().clone();
+
+        let mut members = Vec::new();
+        for config in membership.get_joint_config() {
+            for nid in config.iter() {
+                members.push(*nid);
+            }
+        }
+
+        let last_applied = la.unwrap_or_else(|| {
+            LE::new(VO::new(0, 0).leader_id().clone(), 0)
+        });
+
+        let state = SnapshotState {
+            last_applied_term: last_applied.committed_leader_id().term,
+            last_applied_index: last_applied.index,
+            last_applied_leader_node_id: last_applied.committed_leader_id().node_id,
+            membership_term: last_applied.committed_leader_id().term,
+            membership_node_ids: members,
+        };
+
+        let data = bincode::serialize(&state)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        let snapshot_id = format!(
+            "{}-{}-{}",
+            last_applied.committed_leader_id().term,
+            last_applied.index,
+            last_applied.committed_leader_id().node_id
+        );
+
+        let meta = openraft::SnapshotMeta {
+            snapshot_id,
+            last_log_id: la,
+            last_membership: membership,
+        };
+
+        Ok(Snapshot {
+            meta,
+            snapshot: Cursor::new(data),
+        })
     }
 }
 
@@ -347,6 +399,10 @@ impl RaftStateMachine<C> for StoredStateMachine {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        SnapshotBuilder
+        SnapshotBuilder {
+            db: self.db.clone(),
+            last_applied: self.last_applied.clone(),
+            last_membership: self.last_membership.clone(),
+        }
     }
 }

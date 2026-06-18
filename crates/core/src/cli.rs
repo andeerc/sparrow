@@ -285,9 +285,41 @@ pub enum AutoscaleAction {
 
 #[derive(Subcommand, Debug)]
 pub enum AlertAction {
-    /// Set alert rule
-    Set,
-    /// List alert rules
+    /// Set alert channel (telegram or smtp)
+    Set {
+        /// Channel id
+        id: String,
+        /// Channel type: telegram or smtp
+        channel_type: String,
+        /// Channel name (optional)
+        #[arg(long, default_value = "")]
+        name: String,
+        /// Telegram bot token (required for telegram)
+        #[arg(long)]
+        bot_token: Option<String>,
+        /// Telegram chat id (required for telegram)
+        #[arg(long)]
+        chat_id: Option<String>,
+        /// SMTP host (required for smtp)
+        #[arg(long)]
+        smtp_host: Option<String>,
+        /// SMTP port (default: 587)
+        #[arg(long)]
+        smtp_port: Option<u16>,
+        /// SMTP username (required for smtp)
+        #[arg(long)]
+        smtp_username: Option<String>,
+        /// SMTP password (required for smtp)
+        #[arg(long)]
+        smtp_password: Option<String>,
+        /// From address (required for smtp)
+        #[arg(long)]
+        from: Option<String>,
+        /// To address (required for smtp)
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// List alert channels
     List,
     /// Show alert history
     History,

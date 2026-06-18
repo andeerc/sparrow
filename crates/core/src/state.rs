@@ -111,6 +111,41 @@ impl StateStore {
             );
 
             INSERT OR IGNORE INTO schema_version (version) VALUES (1);
+
+            CREATE TABLE IF NOT EXISTS autoscale_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                service_id  TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                decision    TEXT NOT NULL,
+                replicas_from INTEGER NOT NULL,
+                replicas_to INTEGER NOT NULL,
+                reason      TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+
+            CREATE TABLE IF NOT EXISTS alert_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id  TEXT NOT NULL,
+                channel_type TEXT NOT NULL DEFAULT '',
+                metric      TEXT NOT NULL DEFAULT '',
+                value       REAL NOT NULL DEFAULT 0,
+                threshold   REAL NOT NULL DEFAULT 0,
+                message     TEXT NOT NULL DEFAULT '',
+                severity    TEXT NOT NULL DEFAULT 'info',
+                status      TEXT NOT NULL DEFAULT 'sent',
+                created_at  TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_version (version) VALUES (3);
+
+            CREATE TABLE IF NOT EXISTS alert_channels (
+                id           TEXT PRIMARY KEY,
+                channel_type TEXT NOT NULL,
+                name         TEXT NOT NULL DEFAULT '',
+                config_json  TEXT NOT NULL DEFAULT '{}',
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_version (version) VALUES (4);
             ",
         )?;
         Ok(())
@@ -380,5 +415,162 @@ impl StateStore {
         })?;
 
         Ok(rows.next().transpose()?)
+    }
+
+    pub fn record_autoscale_event(
+        &self,
+        service_id: &str,
+        decision: &str,
+        replicas_from: u32,
+        replicas_to: u32,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO autoscale_events (service_id, decision, replicas_from, replicas_to, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![service_id, decision, replicas_from, replicas_to, reason, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_autoscale_events(&self, service_id: &str, limit: u32) -> anyhow::Result<Vec<AutoscaleEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT decision, replicas_from, replicas_to, reason, created_at
+             FROM autoscale_events WHERE service_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let events = stmt.query_map(params![service_id, limit], |row| {
+            Ok(AutoscaleEvent {
+                decision: row.get(0)?,
+                replicas_from: row.get(1)?,
+                replicas_to: row.get(2)?,
+                reason: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(events)
+    }
+
+    pub fn list_alert_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, metric, operator, threshold, duration_secs, enabled, created_at
+             FROM alert_rules ORDER BY created_at DESC",
+        )?;
+        let rules = stmt.query_map([], |row| {
+            Ok(AlertRule {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                metric: row.get(2)?,
+                operator: row.get(3)?,
+                threshold: row.get(4)?,
+                duration_secs: row.get(5)?,
+                enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(rules)
+    }
+
+    pub fn record_alert_event(
+        &self,
+        channel_id: &str,
+        channel_type: &str,
+        metric: &str,
+        value: f64,
+        threshold: f64,
+        message: &str,
+        severity: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alert_events (channel_id, channel_type, metric, value, threshold, message, severity, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', ?8)",
+            params![
+                channel_id,
+                channel_type,
+                metric,
+                value,
+                threshold,
+                message,
+                severity,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_alert_events(&self, limit: u32) -> anyhow::Result<Vec<AlertEventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel_id, channel_type, metric, value, threshold, message, severity, status, created_at
+             FROM alert_events ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let events = stmt.query_map(params![limit], |row| {
+            Ok(AlertEventRecord {
+                channel_id: row.get(0)?,
+                channel_type: row.get(1)?,
+                metric: row.get(2)?,
+                value: row.get(3)?,
+                threshold: row.get(4)?,
+                message: row.get(5)?,
+                severity: row.get(6)?,
+                status: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(events)
+    }
+
+    pub fn record_alert_channel(
+        &self,
+        id: &str,
+        channel_type: &str,
+        name: &str,
+        config_json: &str,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO alert_channels (id, channel_type, name, config_json, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                channel_type,
+                name,
+                config_json,
+                enabled as i32,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_alert_channels(&self) -> anyhow::Result<Vec<AlertChannelRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, channel_type, name, config_json, enabled, created_at
+             FROM alert_channels ORDER BY created_at DESC",
+        )?;
+        let channels = stmt.query_map([], |row| {
+            Ok(AlertChannelRecord {
+                id: row.get(0)?,
+                channel_type: row.get(1)?,
+                name: row.get(2)?,
+                config_json: row.get(3)?,
+                enabled: row.get::<_, i32>(4)? != 0,
+                created_at: row.get(5)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(channels)
     }
 }

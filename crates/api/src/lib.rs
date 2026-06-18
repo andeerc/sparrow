@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 pub mod dashboard;
 
-use axum::{Router, routing::{get, post, delete}, Json, extract::State};
+use axum::{Router, routing::{get, post, delete}, Json, extract::State, body::Bytes};
 use serde::{Serialize, Deserialize};
 use tokio::sync::RwLock;
 
@@ -108,7 +108,12 @@ pub async fn start_proxy(state: SharedAppState, port: u16) -> anyhow::Result<()>
     Ok(())
 }
 
-pub async fn start_api(state: SharedAppState, listen: &str) -> anyhow::Result<()> {
+pub async fn start_api(
+    state: SharedAppState,
+    listen: &str,
+    tls_cert: Option<&str>,
+    tls_key: Option<&str>,
+) -> anyhow::Result<()> {
     let app = Router::<SharedAppState>::new()
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
@@ -124,6 +129,9 @@ pub async fn start_api(state: SharedAppState, listen: &str) -> anyhow::Result<()
         .route("/api/v1/alerts/channels", get(alert_channels_list))
         .route("/api/v1/alerts/channels", post(alert_channels_add))
         .route("/api/v1/alerts/events", get(alert_events_list))
+        .route("/raft/append_entries", post(raft_append_entries))
+        .route("/raft/vote", post(raft_vote))
+        .route("/raft/snapshot", post(raft_snapshot))
         .merge(dashboard::routes())
         .fallback(proxy::handle_proxy)
         .with_state(state);
@@ -131,9 +139,21 @@ pub async fn start_api(state: SharedAppState, listen: &str) -> anyhow::Result<()
     let addr: std::net::SocketAddr = listen.parse()
         .map_err(|e| anyhow::anyhow!("Invalid address '{listen}': {e}"))?;
 
-    tracing::info!("API server listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    match (tls_cert, tls_key) {
+        (Some(cert_path), Some(key_path)) => {
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {e}"))?;
+            tracing::info!("API server listening TLS on {addr}");
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        _ => {
+            tracing::info!("API server listening on {addr}");
+            axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+        }
+    }
     Ok(())
 }
 
@@ -274,6 +294,79 @@ async fn alert_events_list(State(state): State<SharedAppState>) -> Json<Vec<Aler
     events.reverse();
     events.truncate(100);
     Json(events)
+}
+
+async fn raft_append_entries(
+    State(state): State<SharedAppState>,
+    body: Bytes,
+) -> Result<(axum::http::StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Vec<u8>), (axum::http::StatusCode, String)> {
+    let rpc: sparrow_raft::rpc_types::AppendEntriesReq =
+        bincode::deserialize(&body).map_err(|e| {
+            (axum::http::StatusCode::BAD_REQUEST, format!("deserialize: {e}"))
+        })?;
+    let cluster = state.raft_cluster.read().await;
+    let raft = cluster.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+    })?;
+    let resp = raft.handle_append_entries(rpc).await.map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("append_entries: {e}"))
+    })?;
+    let bytes = bincode::serialize(&resp).map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}"))
+    })?;
+    Ok((axum::http::StatusCode::OK, [(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    )], bytes))
+}
+
+async fn raft_vote(
+    State(state): State<SharedAppState>,
+    body: Bytes,
+) -> Result<(axum::http::StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Vec<u8>), (axum::http::StatusCode, String)> {
+    let rpc: sparrow_raft::rpc_types::VoteReq =
+        bincode::deserialize(&body).map_err(|e| {
+            (axum::http::StatusCode::BAD_REQUEST, format!("deserialize: {e}"))
+        })?;
+    let cluster = state.raft_cluster.read().await;
+    let raft = cluster.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+    })?;
+    let resp = raft.handle_vote(rpc).await.map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("vote: {e}"))
+    })?;
+    let bytes = bincode::serialize(&resp).map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}"))
+    })?;
+    Ok((axum::http::StatusCode::OK, [(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    )], bytes))
+}
+
+async fn raft_snapshot(
+    State(state): State<SharedAppState>,
+    body: Bytes,
+) -> Result<(axum::http::StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Vec<u8>), (axum::http::StatusCode, String)> {
+    let cluster = state.raft_cluster.read().await;
+    let raft = cluster.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+    })?;
+
+    let snap: sparrow_raft::rpc_types::SnapshotWire =
+        bincode::deserialize(&body).map_err(|e| {
+            (axum::http::StatusCode::BAD_REQUEST, format!("deserialize snapshot: {e}"))
+        })?;
+    let resp = raft.handle_snapshot(snap).await.map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("snapshot: {e}"))
+    })?;
+    let bytes = bincode::serialize(&resp).map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}"))
+    })?;
+    Ok((axum::http::StatusCode::OK, [(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    )], bytes))
 }
 
 // ── Init ──

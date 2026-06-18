@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod network;
+pub mod rpc_types;
 pub mod storage;
 pub mod types;
 

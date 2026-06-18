@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Service { action } => handle_service(action, &state, &runtime, &data_dir, podman_ok).await?,
 
         // ── Node Commands (Fase 2) ──
-        Command::Node { action } => handle_node(action).await?,
+        Command::Node { action } => handle_node(action, &state, &cluster_state).await?,
 
         // ── Network Commands (Fase 2) ──
         Command::Network { action } => handle_network(action).await?,
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Autoscale { action } => handle_autoscale(action, &state).await?,
 
         // ── Alert Commands (Fase 4) ──
-        Command::Alert { action } => handle_alert(action).await?,
+        Command::Alert { action } => handle_alert(action, &state).await?,
 
         Command::Mcp { port, host } => {
             let app_state = cluster_state.clone().unwrap_or_else(|| {
@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_cluster(
     action: ClusterAction,
     _state: &StateStore,
-    _config: &SparrowConfig,
+    config: &SparrowConfig,
     cluster_state: &mut Option<sparrow_api::SharedAppState>,
 ) -> anyhow::Result<()> {
     match action {
@@ -179,14 +179,28 @@ async fn handle_cluster(
             let addr = if listen.is_empty() { "0.0.0.0:7443" } else { &listen };
             println!("🔧 Initializing cluster '{name}' on {addr}...");
 
-            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr));
+            let raft_cluster = match (&config.cluster.tls_ca, &config.cluster.tls_cert, &config.cluster.tls_key) {
+                (Some(ca), Some(cert), Some(key)) => {
+                    let tls = sparrow_raft::TlsConfig {
+                        ca: std::fs::read(ca)?,
+                        cert: std::fs::read(cert)?,
+                        key: std::fs::read(key)?,
+                    };
+                    std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(1, addr, tls))
+                }
+                _ => {
+                    std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr))
+                }
+            };
             raft_cluster.init().await?;
 
             let app_state = sparrow_api::init_cluster(&name, "localhost", addr, Some(raft_cluster));
             let cs_clone = app_state.clone();
             let listen_addr = addr.to_string();
+            let tls_cert = config.cluster.tls_cert.clone();
+            let tls_key = config.cluster.tls_key.clone();
             tokio::spawn(async move {
-                if let Err(e) = sparrow_api::start_api(cs_clone, &listen_addr).await {
+                if let Err(e) = sparrow_api::start_api(cs_clone, &listen_addr, tls_cert.as_deref(), tls_key.as_deref()).await {
                     tracing::error!("API server failed: {e}");
                 }
             });
@@ -561,12 +575,83 @@ async fn handle_service(
 
 // ── Node Handler (Fase 2) ──
 
-async fn handle_node(action: NodeAction) -> anyhow::Result<()> {
+async fn handle_node(action: NodeAction, state: &StateStore, cluster_state: &Option<sparrow_api::SharedAppState>) -> anyhow::Result<()> {
     match action {
-        NodeAction::List => println!("📋 Nodes:\n  localhost (self) - Ready"),
-        NodeAction::Inspect { name } => println!("⚠️  Node inspect '{name}' — Fase 2"),
-        NodeAction::Drain { name } => println!("⚠️  Drain '{name}' — Fase 2"),
-        NodeAction::Rm { name } => println!("⚠️  Remove '{name}' — Fase 2"),
+        NodeAction::List => {
+            let nodes = if let Some(app_state) = cluster_state {
+                let cluster = app_state.cluster.read().await;
+                cluster.nodes.keys().cloned().collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            if nodes.is_empty() {
+                println!("📋 Nodes:\n  localhost (self) - Ready");
+            } else {
+                println!("📋 Nodes:");
+                for node in &nodes {
+                    println!("  {node} - Ready");
+                }
+            }
+        }
+        NodeAction::Inspect { name } => {
+            let (in_cluster, _node_list) = if let Some(app_state) = cluster_state {
+                let cluster = app_state.cluster.read().await;
+                (cluster.nodes.contains_key(&name), cluster.nodes.keys().cloned().collect::<Vec<_>>())
+            } else {
+                (false, vec![])
+            };
+            if in_cluster || name == "localhost" || name == "self" {
+                println!("📋 Node '{}':", name);
+                let services = state.list_services()?;
+                let total: usize = services.iter().map(|s| {
+                    state.get_service_containers(&s.id).map(|cs| {
+                        cs.iter().filter(|c| c.node_id == name || name == "localhost" || name == "self").count()
+                    }).unwrap_or(0)
+                }).sum();
+                println!("  Containers running: {total}");
+                println!("  Status: Ready");
+            } else {
+                eprintln!("❌ Node '{name}' not found in cluster");
+            }
+        }
+        NodeAction::Drain { name } => {
+            if let Some(app_state) = cluster_state {
+                let in_cluster = {
+                    let cluster = app_state.cluster.read().await;
+                    cluster.nodes.contains_key(&name)
+                };
+                if in_cluster {
+                    let services = state.list_services()?;
+                    for svc in &services {
+                        let containers = state.get_service_containers(&svc.id)?;
+                        for c in containers.iter().filter(|c| c.node_id == name) {
+                            state.update_container_state(&c.name, "Drained")?;
+                            println!("  Drained {}/{}", svc.name, c.name);
+                        }
+                    }
+                    println!("✅ Node '{name}' drained");
+                } else {
+                    eprintln!("❌ Node '{name}' not found in cluster");
+                }
+            } else {
+                eprintln!("❌ Drain requires multi-node cluster (init with `sparrow cluster init`)");
+            }
+        }
+        NodeAction::Rm { name } => {
+            if let Some(app_state) = cluster_state {
+                let mut cluster = app_state.cluster.write().await;
+                if cluster.nodes.contains_key(&name) {
+                    cluster.nodes.remove(&name);
+                    println!("✅ Node '{name}' removed from cluster");
+                } else if name == "localhost" || name == "self" {
+                    eprintln!("❌ Cannot remove self node");
+                } else {
+                    eprintln!("❌ Node '{name}' not found in cluster");
+                }
+            } else {
+                eprintln!("❌ Remove requires multi-node cluster (init with `sparrow cluster init`)");
+            }
+        }
     }
     Ok(())
 }
@@ -660,7 +745,25 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
             }
         }
         AutoscaleAction::History { service, last } => {
-            println!("⚠️  Autoscale history '{service}' (last {last}) — Fase 3");
+            let svc = match state.get_service(&service)? {
+                Some(s) => s,
+                None => { eprintln!("❌ Service '{service}' not found"); return Ok(()); }
+            };
+            let limit: u32 = last.parse().unwrap_or(10);
+            let events = state.list_autoscale_events(&svc.id, limit)?;
+            if events.is_empty() {
+                println!("📭 No autoscale events for '{}'", svc.name);
+            } else {
+                let rows: Vec<Vec<String>> = events.iter().map(|e| {
+                    vec![
+                        e.created_at.clone(),
+                        e.decision.clone(),
+                        format!("{} → {}", e.replicas_from, e.replicas_to),
+                        e.reason.clone(),
+                    ]
+                }).collect();
+                print_table(&["TIME", "DECISION", "REPLICAS", "REASON"], rows);
+            }
         }
         AutoscaleAction::Pause { service } => {
             let svc = match state.get_service(&service)? {
@@ -692,11 +795,69 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
 
 // ── Alert Handler (Fase 4) ──
 
-async fn handle_alert(action: AlertAction) -> anyhow::Result<()> {
+async fn handle_alert(action: AlertAction, state: &StateStore) -> anyhow::Result<()> {
     match action {
-        AlertAction::Set => println!("⚠️  Alert set — Fase 4"),
-        AlertAction::List => println!("⚠️  Alert list — Fase 4"),
-        AlertAction::History => println!("⚠️  Alert history — Fase 4"),
+        AlertAction::Set { id, channel_type, name, bot_token, chat_id, smtp_host, smtp_port, smtp_username, smtp_password, from, to } => {
+            let config = match channel_type.as_str() {
+                "telegram" => {
+                    let bot_token = bot_token.ok_or_else(|| anyhow::anyhow!("--bot_token required for telegram"))?;
+                    let chat_id = chat_id.ok_or_else(|| anyhow::anyhow!("--chat_id required for telegram"))?;
+                    serde_json::json!({ "bot_token": bot_token, "chat_id": chat_id })
+                }
+                "smtp" | "email" => {
+                    let smtp_host = smtp_host.ok_or_else(|| anyhow::anyhow!("--smtp_host required for smtp"))?;
+                    let smtp_username = smtp_username.ok_or_else(|| anyhow::anyhow!("--smtp_username required for smtp"))?;
+                    let smtp_password = smtp_password.ok_or_else(|| anyhow::anyhow!("--smtp_password required for smtp"))?;
+                    let from = from.ok_or_else(|| anyhow::anyhow!("--from required for smtp"))?;
+                    let to = to.ok_or_else(|| anyhow::anyhow!("--to required for smtp"))?;
+                    serde_json::json!({
+                        "smtp_host": smtp_host,
+                        "smtp_port": smtp_port.unwrap_or(587),
+                        "username": smtp_username,
+                        "password": smtp_password,
+                        "from": from,
+                        "to": to,
+                    })
+                }
+                other => anyhow::bail!("unsupported channel type: {other} (use telegram or smtp)"),
+            };
+            state.record_alert_channel(&id, &channel_type, &name, &config.to_string(), true)?;
+            println!("✅ Alert channel '{}' ({}) saved", id, channel_type);
+        }
+        AlertAction::List => {
+            let rules = state.list_alert_rules()?;
+            if rules.is_empty() {
+                println!("📭 No alert rules configured");
+            } else {
+                let rows: Vec<Vec<String>> = rules.iter().map(|r| {
+                    vec![
+                        r.id.clone(),
+                        r.name.clone(),
+                        r.metric.clone(),
+                        format!("{} {}", r.operator, r.threshold),
+                        format!("{}s", r.duration_secs),
+                        if r.enabled { "yes" } else { "no" }.to_string(),
+                    ]
+                }).collect();
+                print_table(&["ID", "NAME", "METRIC", "CONDITION", "DURATION", "ENABLED"], rows);
+            }
+        }
+        AlertAction::History => {
+            let events = state.list_alert_events(50)?;
+            if events.is_empty() {
+                println!("📭 No alert events recorded");
+            } else {
+                let rows: Vec<Vec<String>> = events.iter().map(|e| {
+                    vec![
+                        e.created_at.clone(),
+                        e.severity.clone(),
+                        e.channel_type.clone(),
+                        e.message.clone(),
+                    ]
+                }).collect();
+                print_table(&["TIME", "SEVERITY", "CHANNEL", "MESSAGE"], rows);
+            }
+        }
     }
     Ok(())
 }

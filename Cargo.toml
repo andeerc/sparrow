@@ -29,3 +29,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 anyhow = "1"
 dirs = "5"
+serde_json = "1"

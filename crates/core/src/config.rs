@@ -28,6 +28,18 @@ pub struct ClusterConfig {
 
     #[serde(default)]
     pub data_dir: String,
+
+    /// Optional CA cert path for mTLS between raft nodes
+    #[serde(default)]
+    pub tls_ca: Option<String>,
+
+    /// Optional client cert path for mTLS
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+
+    /// Optional client key path for mTLS
+    #[serde(default)]
+    pub tls_key: Option<String>,
 }
 
 impl Default for ClusterConfig {
@@ -37,6 +49,9 @@ impl Default for ClusterConfig {
             listen: default_listen(),
             raft_port: Some(7444),
             data_dir: String::from("/var/lib/sparrow"),
+            tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }
@@ -134,6 +149,9 @@ impl Default for SparrowConfig {
                 listen: "0.0.0.0:7443".to_string(),
                 raft_port: Some(7444),
                 data_dir: "/var/lib/sparrow".to_string(),
+                tls_ca: None,
+                tls_cert: None,
+                tls_key: None,
             },
             runtime: RuntimeConfig {
                 backend: "podman".to_string(),

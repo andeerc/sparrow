@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: docker
+    container:
+      image: rust:1.81-slim-bookworm
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --workspace

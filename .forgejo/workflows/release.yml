@@ -17,13 +17,6 @@ jobs:
           git fetch origin --depth 1 ${GITHUB_REF_NAME}
           git checkout FETCH_HEAD
 
-      - name: Install Rust
-        run: |
-          apt-get update -qq
-          apt-get install -y -qq curl build-essential
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
       # ── Build Rust binary ──
       - name: Build binary
         run: cargo build --release --locked

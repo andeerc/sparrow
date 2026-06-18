@@ -11,6 +11,8 @@ use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
 use sparrow_podman::PodmanRuntime;
 use sparrow_proto::*;
+use sparrow_api::init_cluster;
+use sparrow_mcp::start_mcp;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -88,9 +90,13 @@ async fn main() -> anyhow::Result<()> {
         // ── Alert Commands (Fase 4) ──
         Command::Alert { action } => handle_alert(action).await?,
 
-        // ── MCP Server (Fase 4) ──
         Command::Mcp { port, host } => {
-            println!("⚠️  MCP server ({host}:{port}) — Fase 4, not yet implemented");
+            let app_state = cluster_state.clone().unwrap_or_else(|| {
+                init_cluster("default", "localhost", &format!("{host}:{port}"), None)
+            });
+            let addr = format!("{host}:{port}");
+            println!("🔌 Starting MCP server on {addr}...");
+            start_mcp(app_state, state.clone(), runtime.clone(), &addr).await?;
         }
 
         // ── Deploy (Fase 3) ──

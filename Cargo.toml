@@ -21,6 +21,7 @@ sparrow-podman = { path = "crates/podman" }
 sparrow-proto = { path = "crates/proto" }
 sparrow-raft = { path = "crates/raft" }
 sparrow-api = { path = "crates/api" }
+sparrow-mcp = { path = "crates/mcp" }
 
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

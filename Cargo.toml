@@ -6,6 +6,7 @@ members = [
     "crates/proto",
     "crates/raft",
     "crates/api",
+    "crates/mcp",
 ]
 
 [package]

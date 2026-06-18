@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sparrow Dashboard</title>
+<style>
+  /* ── Reset & Base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: #0f1117; color: #e1e4e8; line-height: 1.5;
+    padding: 1rem; min-height: 100vh;
+  }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Layout ── */
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* ── Header ── */
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 0.75rem;
+    padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  }
+  .header-left { display: flex; align-items: center; gap: 0.75rem; }
+  .header-logo {
+    width: 36px; height: 36px; border-radius: 8px;
+    background: linear-gradient(135deg, #238636, #2ea043);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem; color: #fff; font-weight: 700;
+  }
+  .header-title { font-size: 1.25rem; font-weight: 600; color: #f0f6fc; }
+  .header-subtitle { font-size: 0.85rem; color: #8b949e; }
+  .header-right { display: flex; align-items: center; gap: 1rem; }
+  .refresh-indicator { font-size: 0.8rem; color: #8b949e; }
+  .refresh-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #3fb950; margin-right: 4px;
+    transition: background 0.3s;
+  }
+  .refresh-dot.loading { background: #d29922; animation: pulse 0.6s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Stats Cards ── */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1rem; margin-bottom: 1.5rem;
+  }
+  .stat-card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 1rem 1.25rem;
+  }
+  .stat-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-value { font-size: 1.75rem; font-weight: 700; margin-top: 4px; }
+  .stat-value.green { color: #3fb950; }
+  .stat-value.yellow { color: #d29922; }
+  .stat-value.red { color: #f85149; }
+  .stat-value.blue { color: #58a6ff; }
+
+  /* ── Section ── */
+  .section {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    margin-bottom: 1.5rem; overflow: hidden;
+  }
+  .section-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.875rem 1.25rem;
+    border-bottom: 1px solid #30363d;
+    font-size: 0.95rem; font-weight: 600; color: #f0f6fc;
+  }
+  .section-count {
+    margin-left: auto; font-size: 0.8rem; font-weight: 400;
+    color: #8b949e; background: #21262d; padding: 2px 8px;
+    border-radius: 10px;
+  }
+
+  /* ── Tables ── */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  thead th {
+    text-align: left; padding: 0.625rem 1.25rem;
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px;
+    color: #8b949e; background: #0d1117; border-bottom: 1px solid #30363d;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 0.625rem 1.25rem; border-bottom: 1px solid #21262d;
+    vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #1c2128; }
+
+  /* ── Status Badge ── */
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 10px; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 500;
+  }
+  .badge-ready { background: #0f2d1a; color: #3fb950; border: 1px solid #238636; }
+  .badge-unreachable { background: #2d0f14; color: #f85149; border: 1px solid #da3633; }
+  .badge-leader { background: #0d1f3d; color: #58a6ff; border: 1px solid #1f6feb; }
+  .badge-worker { background: #1c2128; color: #8b949e; border: 1px solid #30363d; }
+  .badge-active { background: #0f2d1a; color: #3fb950; border: 1px solid #238636; }
+  .badge-paused { background: #2d1f0e; color: #d29922; border: 1px solid #9e6a03; }
+
+  /* ── CPU Bar ── */
+  .cpu-bar-wrap { display: flex; align-items: center; gap: 0.5rem; }
+  .cpu-bar-bg {
+    flex: 1; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden;
+  }
+  .cpu-bar-fill {
+    height: 100%; border-radius: 3px; transition: width 0.5s ease;
+  }
+  .cpu-bar-fill.low { background: #3fb950; }
+  .cpu-bar-fill.mid { background: #d29922; }
+  .cpu-bar-fill.high { background: #f85149; }
+
+  /* ── Empty State ── */
+  .empty { padding: 2rem; text-align: center; color: #8b949e; font-size: 0.9rem; }
+
+  /* ── Error Banner ── */
+  .error-banner {
+    display: none; padding: 0.75rem 1.25rem; margin-bottom: 1rem;
+    background: #2d0f14; border: 1px solid #da3633; border-radius: 8px;
+    color: #f85149; font-size: 0.875rem;
+  }
+  .error-banner.show { display: block; }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    body { padding: 0.5rem; }
+    .header { flex-direction: column; align-items: stretch; text-align: center; }
+    .header-left { justify-content: center; }
+    .header-right { justify-content: center; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
+    .stat-value { font-size: 1.4rem; }
+    table { font-size: 0.8rem; }
+    thead th, tbody td { padding: 0.5rem 0.75rem; }
+    .section-header { padding: 0.75rem 1rem; }
+  }
+
+  @media (max-width: 400px) {
+    .stats-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-left">
+      <div class="header-logo">S</div>
+      <div>
+        <div class="header-title">Sparrow Dashboard</div>
+        <div class="header-subtitle" id="clusterName">Cluster · v0.1.0</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="refresh-indicator">
+        <span class="refresh-dot" id="refreshDot"></span>
+        <span id="refreshTime">auto-refresh 30s</span>
+      </span>
+      <button onclick="refreshNow()" style="
+        background: #21262d; border: 1px solid #30363d; color: #c9d1d9;
+        padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+      ">Refresh</button>
+    </div>
+  </header>
+
+  <!-- Error Banner -->
+  <div class="error-banner" id="errorBanner"></div>
+
+  <!-- Stats Cards -->
+  <div class="stats-row" id="statsRow"></div>
+
+  <!-- Nodes Section -->
+  <div class="section">
+    <div class="section-header">
+      <span>&#127760;</span> Nodes
+      <span class="section-count" id="nodeCount">0</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Address</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th>Containers</th>
+            <th>Heartbeat</th>
+          </tr>
+        </thead>
+        <tbody id="nodesBody">
+          <tr><td colspan="6" class="empty">Loading nodes...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Autoscale Section -->
+  <div class="section">
+    <div class="section-header">
+      <span>&#9881;</span> Autoscale Policies
+      <span class="section-count" id="autoscaleCount">0</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>Min</th>
+            <th>Max</th>
+            <th>CPU Target</th>
+            <th>Cooldown</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="autoscaleBody">
+          <tr><td colspan="6" class="empty">Loading autoscale policies...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="text-align:center; padding:1.5rem 0 0.5rem; font-size:0.75rem; color:#484f58;">
+    Sparrow Orchestrator · <a href="/api/v1/health">API Health</a>
+  </div>
+
+</div>
+
+<script>
+(async function() {
+  'use strict';
+
+  const REFRESH_MS = 30000;
+  let refreshTimer = null;
+  let lastRefresh = Date.now();
+
+  // ── Fetch helpers ──
+
+  async function apiGet(path) {
+    const resp = await fetch(path);
+    if (!resp.ok) throw new Error(`${path} → ${resp.status} ${resp.statusText}`);
+    return resp.json();
+  }
+
+  function showError(msg) {
+    const el = document.getElementById('errorBanner');
+    el.textContent = msg;
+    el.classList.add('show');
+  }
+
+  function hideError() {
+    document.getElementById('errorBanner').classList.remove('show');
+  }
+
+  // ── Render helpers ──
+
+  function statusBadge(status, role) {
+    if (role === 'leader') return '<span class="badge badge-leader">leader</span>';
+    if (status === 'ready') return '<span class="badge badge-ready">ready</span>';
+    if (status === 'unreachable') return '<span class="badge badge-unreachable">unreachable</span>';
+    return `<span class="badge badge-worker">${status}</span>`;
+  }
+
+  function autoBadge(paused) {
+    return paused
+      ? '<span class="badge badge-paused">paused</span>'
+      : '<span class="badge badge-active">active</span>';
+  }
+
+  function cpuBar(value, target) {
+    const pct = target > 0 ? Math.round((value / target) * 100) : 0;
+    const cls = pct >= 90 ? 'high' : pct >= 70 ? 'mid' : 'low';
+    const barPct = Math.min(pct, 100);
+    return `<div class="cpu-bar-wrap">
+      <span style="min-width:36px;font-size:0.8rem;">${value.toFixed(1)}%</span>
+      <div class="cpu-bar-bg"><div class="cpu-bar-fill ${cls}" style="width:${barPct}%"></div></div>
+      <span style="font-size:0.75rem;color:#8b949e;min-width:40px;">target ${target}%</span>
+    </div>`;
+  }
+
+  function timeAgo(ts) {
+    const sec = Math.floor((Date.now() / 1000) - ts);
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    return Math.floor(sec / 3600) + 'h ago';
+  }
+
+  // ── Main render ──
+
+  async function refresh() {
+    const dot = document.getElementById('refreshDot');
+    dot.classList.add('loading');
+
+    try {
+      hideError();
+
+      const [healthData, nodesData, clusterData, autoscaleData] = await Promise.all([
+        apiGet('/api/v1/health'),
+        apiGet('/api/v1/nodes'),
+        apiGet('/api/v1/cluster/status').catch(() => null),
+        apiGet('/api/v1/autoscale'),
+      ]);
+
+      // Cluster name
+      const ver = healthData.version || '0.1.0';
+      const cName = clusterData ? clusterData.name : 'sparrow';
+      document.getElementById('clusterName').textContent = cName + ' · v' + ver;
+
+      // Stats cards
+      const statsEl = document.getElementById('statsRow');
+      if (clusterData) {
+        statsEl.innerHTML = `
+          <div class="stat-card">
+            <div class="stat-label">Nodes Total</div>
+            <div class="stat-value blue">${clusterData.nodes_total}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Ready</div>
+            <div class="stat-value green">${clusterData.nodes_ready}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Unreachable</div>
+            <div class="stat-value ${clusterData.nodes_unreachable > 0 ? 'red' : 'green'}">${clusterData.nodes_unreachable}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Policies</div>
+            <div class="stat-value blue">${Array.isArray(autoscaleData) ? autoscaleData.length : 0}</div>
+          </div>
+        `;
+      } else {
+        statsEl.innerHTML = `
+          <div class="stat-card">
+            <div class="stat-label">Nodes</div>
+            <div class="stat-value blue">${nodesData.length}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Policies</div>
+            <div class="stat-value blue">${Array.isArray(autoscaleData) ? autoscaleData.length : 0}</div>
+          </div>
+        `;
+      }
+
+      // Nodes table
+      document.getElementById('nodeCount').textContent = nodesData.length;
+      const nodesBody = document.getElementById('nodesBody');
+      if (nodesData.length === 0) {
+        nodesBody.innerHTML = '<tr><td colspan="6" class="empty">No nodes registered</td></tr>';
+      } else {
+        nodesBody.innerHTML = nodesData.map(n => `
+          <tr>
+            <td><strong>${esc(n.name)}</strong></td>
+            <td>${esc(n.addr)}</td>
+            <td>${statusBadge(n.status, n.role)}</td>
+            <td>${statusBadge(n.status)}</td>
+            <td>${n.containers}</td>
+            <td style="font-size:0.8rem;color:#8b949e;">${timeAgo(n.last_heartbeat)}</td>
+          </tr>
+        `).join('');
+      }
+
+      // Autoscale table
+      const policies = Array.isArray(autoscaleData) ? autoscaleData : [];
+      document.getElementById('autoscaleCount').textContent = policies.length;
+      const autoBody = document.getElementById('autoscaleBody');
+      if (policies.length === 0) {
+        autoBody.innerHTML = '<tr><td colspan="6" class="empty">No autoscale policies configured</td></tr>';
+      } else {
+        autoBody.innerHTML = policies.map(p => `
+          <tr>
+            <td><strong>${esc(p.service_id)}</strong></td>
+            <td>${p.min_replicas}</td>
+            <td>${p.max_replicas}</td>
+            <td>${cpuBar(p.cpu_target_percent, p.cpu_target_percent)}</td>
+            <td style="font-size:0.8rem;color:#8b949e;">${p.cooldown_seconds || 0}s</td>
+            <td>${autoBadge(p.paused)}</td>
+          </tr>
+        `).join('');
+      }
+
+      lastRefresh = Date.now();
+      document.getElementById('refreshTime').textContent = 'just now';
+
+    } catch (err) {
+      showError('Failed to load dashboard: ' + err.message);
+      console.error('Dashboard refresh error:', err);
+    } finally {
+      dot.classList.remove('loading');
+    }
+  }
+
+  function esc(s) {
+    if (typeof s !== 'string') s = String(s);
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  // ── Refresh timer ──
+
+  function startTimer() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      const sec = Math.floor((REFRESH_MS - (Date.now() - lastRefresh)) / 1000);
+      document.getElementById('refreshTime').textContent = Math.max(0, sec) + 's';
+      if (sec <= 0) refresh();
+    }, 1000);
+  }
+
+  window.refreshNow = function() {
+    refresh();
+  };
+
+  // ── Init ──
+
+  await refresh();
+  startTimer();
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+[package]
+name = "sparrow-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.7", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+async-stream = "0.3"
+futures-core = "0.3"
+sparrow-api = { path = "../api" }
+sparrow-core = { path = "../core" }
+sparrow-podman = { path = "../podman" }

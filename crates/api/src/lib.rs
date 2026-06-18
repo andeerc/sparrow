@@ -1,5 +1,9 @@
+pub mod proxy;
+
 use std::sync::Arc;
 use std::collections::HashMap;
+
+pub mod dashboard;
 
 use axum::{Router, routing::{get, post, delete}, Json, extract::State};
 use serde::{Serialize, Deserialize};
@@ -80,14 +84,32 @@ pub struct AppState {
     pub proxy_routes: RwLock<Vec<ProxyRoute>>,
     pub autoscale_policies: RwLock<HashMap<String, AutoscalePolicy>>,
     pub alerts: RwLock<AlertState>,
+    pub raft_cluster: RwLock<Option<std::sync::Arc<sparrow_raft::RaftCluster>>>,
 }
 
 pub type SharedAppState = Arc<AppState>;
 
 // ── API Server ──
 
+pub async fn start_proxy(state: SharedAppState, port: u16) -> anyhow::Result<()> {
+    if port == 0 {
+        tracing::info!("Proxy server disabled (port 0)");
+        return Ok(());
+    }
+
+    let app = Router::<SharedAppState>::new()
+        .fallback(proxy::handle_proxy)
+        .with_state(state);
+
+    let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+    tracing::info!("Proxy server listening on {addr}");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 pub async fn start_api(state: SharedAppState, listen: &str) -> anyhow::Result<()> {
-    let app = Router::new()
+    let app = Router::<SharedAppState>::new()
         .route("/health", get(health))
         .route("/api/v1/health", get(health))
         .route("/api/v1/nodes", get(list_nodes))
@@ -102,6 +124,8 @@ pub async fn start_api(state: SharedAppState, listen: &str) -> anyhow::Result<()
         .route("/api/v1/alerts/channels", get(alert_channels_list))
         .route("/api/v1/alerts/channels", post(alert_channels_add))
         .route("/api/v1/alerts/events", get(alert_events_list))
+        .merge(dashboard::routes())
+        .fallback(proxy::handle_proxy)
         .with_state(state);
 
     let addr: std::net::SocketAddr = listen.parse()
@@ -164,12 +188,22 @@ async fn cluster_status(State(state): State<SharedAppState>) -> Json<serde_json:
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let unreachable = cluster.nodes.values().filter(|n| now - n.last_heartbeat > 30).count();
+    let cluster_name = cluster.name.clone();
+    drop(cluster);
+
+    let raft_guard = state.raft_cluster.read().await;
+    let leader = match raft_guard.as_ref() {
+        Some(rc) => rc.current_leader().await,
+        None => None,
+    };
+    drop(raft_guard);
 
     Json(serde_json::json!({
-        "name": cluster.name,
+        "name": cluster_name,
         "nodes_total": total,
         "nodes_ready": ready,
         "nodes_unreachable": unreachable,
+        "raft_leader": leader,
     }))
 }
 
@@ -244,7 +278,12 @@ async fn alert_events_list(State(state): State<SharedAppState>) -> Json<Vec<Aler
 
 // ── Init ──
 
-pub fn init_cluster(name: &str, node_name: &str, addr: &str) -> SharedAppState {
+pub fn init_cluster(
+    name: &str,
+    node_name: &str,
+    addr: &str,
+    raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
+) -> SharedAppState {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let cluster = ClusterState {
@@ -268,5 +307,6 @@ pub fn init_cluster(name: &str, node_name: &str, addr: &str) -> SharedAppState {
         proxy_routes: RwLock::new(vec![]),
         autoscale_policies: RwLock::new(HashMap::new()),
         alerts: RwLock::new(AlertState { channels: vec![], events: vec![] }),
+        raft_cluster: RwLock::new(raft_cluster),
     })
 }

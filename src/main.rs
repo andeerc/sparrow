@@ -5,6 +5,7 @@ use clap::Parser;
 use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
+use sparrow_core::autoscale::AutoscaleEngine;
 use sparrow_core::cli::{Cli, Command, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction};
 use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
@@ -56,6 +57,14 @@ async fn main() -> anyhow::Result<()> {
         let hc_runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
             health_check_loop(hc_state, hc_runtime).await;
+        });
+
+        // Start autoscaling engine
+        let as_state = Arc::clone(&state);
+        let as_runtime = Arc::clone(&runtime);
+        let engine = AutoscaleEngine::new(as_state, as_runtime);
+        tokio::spawn(async move {
+            let _ = engine.start().await;
         });
     }
 
@@ -165,7 +174,10 @@ async fn handle_cluster(
             let addr = if listen.is_empty() { "0.0.0.0:7443" } else { &listen };
             println!("🔧 Initializing cluster '{name}' on {addr}...");
 
-            let app_state = sparrow_api::init_cluster(&name, "localhost", addr);
+            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr));
+            raft_cluster.init().await?;
+
+            let app_state = sparrow_api::init_cluster(&name, "localhost", addr, Some(raft_cluster));
             let cs_clone = app_state.clone();
             let listen_addr = addr.to_string();
             tokio::spawn(async move {
@@ -174,22 +186,50 @@ async fn handle_cluster(
                 }
             });
 
+            let proxy_state = app_state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = sparrow_api::start_proxy(proxy_state, 7444).await {
+                    tracing::error!("Proxy server failed: {e}");
+                }
+            });
+
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            println!("✅ Cluster '{name}' initialized. API listening on {addr}");
+            println!("✅ Cluster '{name}' initialized. API on {addr}, proxy on 7444");
             println!("   Join token: sparrow-{}-tok-{:x}", name, name.len());
             *cluster_state = Some(app_state);
         }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");
-            println!("⚠️  Full join protocol — Raft consensus (Fase 2)");
+            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(2, "0.0.0.0:7443"));
+            raft_cluster.join(&addr).await?;
+            let app_state = sparrow_api::init_cluster("default", "localhost", "0.0.0.0:7443", Some(raft_cluster));
+            *cluster_state = Some(app_state);
+            println!("✅ Joined cluster at {addr}");
         }
         ClusterAction::Status => {
             match cluster_state {
                 Some(cs) => {
                     let cluster = cs.cluster.read().await;
-                    println!("📊 Cluster: '{}' ({} nodes)", cluster.name, cluster.nodes.len());
-                    for node in cluster.nodes.values() {
-                        println!("   {} @ {} — {} ({})", node.name, node.addr, node.role, node.status);
+                    let cluster_name = cluster.name.clone();
+                    let nodes: Vec<_> = cluster.nodes.values().map(|n| {
+                        format!("   {} @ {} — {} ({})", n.name, n.addr, n.role, n.status)
+                    }).collect();
+                    drop(cluster);
+
+                    let raft_leader = {
+                        let ra = cs.raft_cluster.read().await;
+                        match ra.as_ref() {
+                            Some(rc) => rc.current_leader().await,
+                            None => None,
+                        }
+                    };
+
+                    println!("📊 Cluster: '{cluster_name}' ({} nodes)", nodes.len());
+                    for line in &nodes {
+                        println!("{line}");
+                    }
+                    if let Some(lid) = raft_leader {
+                        println!("   Raft leader: node {lid}");
                     }
                 }
                 None => {

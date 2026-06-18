@@ -10,6 +10,8 @@
 //! - `error` — Sistema de erros tipado com thiserror
 //! - `state` — State store SQLite (WAL mode) para serviços, containers, autoscale
 
+pub mod alerts;
+pub mod autoscale;
 pub mod cli;
 pub mod config;
 pub mod deploy;

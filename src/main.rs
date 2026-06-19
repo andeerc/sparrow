@@ -123,12 +123,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cluster_state: Option<sparrow_api::SharedAppState> = None;
 
-    match &cli.command {
-        Command::Config { action } => {
-            handle_config(action, &config_path).await?;
-            return Ok(());
-        }
-        _ => {}
+    if let Command::Config { action } = &cli.command {
+        handle_config(action, &config_path).await?;
+        return Ok(());
     }
 
     match cli.command {
@@ -1275,7 +1272,7 @@ fn print_box(title: &str, rows: &[(&str, &str)]) {
         let line_w = l.len() + 2 + v.len();
         if line_w > min_w { min_w = line_w; }
     }
-    let w = min_w.max(40).min(72);
+    let w = min_w.clamp(40, 72);
     let val_w = w.saturating_sub(label_w + 4); // 4 = "│ " (2) + "  " (2) before val; trailing " │" (2) included in w+2
 
     println!("┌{}┐", "─".repeat(w));

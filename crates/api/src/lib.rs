@@ -1,13 +1,13 @@
 pub mod proxy;
+pub mod dashboard;
 
 use std::sync::Arc;
 use std::collections::HashMap;
 
-pub mod dashboard;
-
 use axum::{Router, routing::{get, post, delete}, Json, extract::State, body::Bytes};
 use serde::{Serialize, Deserialize};
 use tokio::sync::RwLock;
+use sparrow_core::state::StateStore;
 
 // ── Cluster Types ──
 
@@ -87,6 +87,7 @@ pub struct AppState {
     pub autoscale_policies: RwLock<HashMap<String, AutoscalePolicy>>,
     pub alerts: RwLock<AlertState>,
     pub raft_cluster: RwLock<Option<std::sync::Arc<sparrow_raft::RaftCluster>>>,
+    pub state_store: Option<Arc<StateStore>>,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -128,6 +129,10 @@ pub async fn start_api(
         .route("/api/v1/autoscale", get(autoscale_list))
         .route("/api/v1/autoscale", post(autoscale_set))
         .route("/api/v1/autoscale/{service_id}", delete(autoscale_remove))
+        .route("/api/v1/services", get(service_list))
+        .route("/api/v1/services/{id}", get(service_get))
+        .route("/api/v1/services/{id}", delete(service_delete))
+        .route("/api/v1/services/{id}/scale", post(service_scale))
         .route("/api/v1/alerts/channels", get(alert_channels_list))
         .route("/api/v1/alerts/channels", post(alert_channels_add))
         .route("/api/v1/alerts/events", get(alert_events_list))
@@ -428,7 +433,83 @@ pub fn init_cluster(
         autoscale_policies: RwLock::new(HashMap::new()),
         alerts: RwLock::new(AlertState { channels: vec![], events: vec![] }),
         raft_cluster: RwLock::new(raft_cluster),
+        state_store: None,
     })
+}
+
+// ── Service CRUD Handlers ──
+
+async fn service_list(
+    State(state): State<SharedAppState>,
+) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let services = store.list_services().map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}"))
+    })?;
+    Ok(Json(services.into_iter().map(|s| {
+        serde_json::json!({
+            "id": s.id, "name": s.name, "image": s.image,
+            "desired_replicas": s.desired_replicas,
+            "ports": s.ports, "created_at": s.created_at,
+        })
+    }).collect()))
+}
+
+async fn service_get(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let svc = store.get_service(&id).map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("get: {e}"))
+    })?.ok_or_else(|| {
+        (axum::http::StatusCode::NOT_FOUND, format!("Service '{id}' not found"))
+    })?;
+    let containers = store.get_service_containers(&svc.id).unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "service": {
+            "id": svc.id, "name": svc.name, "image": svc.image,
+            "desired_replicas": svc.desired_replicas,
+            "ports": svc.ports, "created_at": svc.created_at,
+        },
+        "containers": containers,
+    })))
+}
+
+async fn service_delete(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let removed = store.delete_service(&id).map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}"))
+    })?;
+    Ok(Json(serde_json::json!({"removed": removed})))
+}
+
+#[derive(Deserialize)]
+struct ScaleRequest {
+    replicas: u32,
+}
+
+async fn service_scale(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<ScaleRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let updated = store.update_replicas(&id, req.replicas).map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("scale: {e}"))
+    })?;
+    Ok(Json(serde_json::json!({"updated": updated, "replicas": req.replicas})))
 }
 
 // ── AppState helpers for main.rs ──

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 sparrow-raft = { path = "../raft" }
+sparrow-core = { path = "../core" }
 axum = { version = "0.7", features = ["macros"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }

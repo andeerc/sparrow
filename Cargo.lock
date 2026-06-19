@@ -2220,6 +2220,7 @@ dependencies = [
  "hyper-util",
  "serde",
  "serde_json",
+ "sparrow-core",
  "sparrow-raft",
  "tokio",
  "tracing",

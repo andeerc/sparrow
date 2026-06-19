@@ -46,37 +46,20 @@ sparrow/
 └── .gitignore
 ```
 
-## Status da Implementação
+## Funcionalidades
 
-| Fase | Feature | Status |
-|---|---|---|
-| **0** | **Foundation** | ✅ **COMPLETA** |
-| | CLI com todos comandos | ✅ |
-| | Config loader (YAML) | ✅ |
-| | Errors tipados (thiserror) | ✅ |
-| | SQLite state store (WAL) | ✅ |
-| | Podman runtime wrapper | ✅ |
-| | Service CRUD (create/list/rm) | ✅ |
-| | Podman stats integration | ✅ |
-| | Autoscale config CRUD | ✅ |
-| | Network proxy (podman network) | ✅ |
-| | Rolling update (básico) | ✅ |
-| **1** | **Single-node MVP** | ✅ **COMPLETA** |
-| | Health check loop (30s, restart/scale-up) | ✅ |
-| | Logs follow streaming (tokio mpsc) | ✅ |
-| | Deploy from YAML (declarativo) | ✅ |
-| **2** | **Multi-node** | ✅ **COMPLETA** |
-| | Raft consensus (openraft storage/network/cluster) | ✅ |
-| | Cluster init/join bootstrap | ✅ |
-| | Node management (API) | ✅ |
-| **3** | **Produção** | ✅ **COMPLETA** |
-| | Reverse proxy (hyper, roteamento por domínio) | ✅ |
-| | Autoscaling engine (CPU/mem, cooldown, thresholds) | ✅ |
-| | Deploy YAML completo (autoscale incluso) | ✅ |
-| **4** | **Maturidade** | ✅ **COMPLETA** |
-| | MCP server (SSE, 5 tools, 2 resources) | ✅ |
-| | Alertas (Telegram Bot API + Email SMTP) | ✅ |
-| | Health dashboard SPA (dark theme, responsivo) | ✅ |
+| Categoria | O que faz |
+|---|---|
+| **Serviços** | `create`, `list`, `ps`, `inspect`, `scale`, `logs` (tail/follow), `rm`, `rolling update` |
+| **Cluster** | `init` (multi-node com Raft), `join`, `status`, `members` |
+| **Declarativo** | Deploy via YAML com autoscale incluso |
+| **Autoscale** | Auto-scaling por CPU/memória com cooldown, pause/resume |
+| **Rede** | Proxy reverso por domínio (porta 7444) |
+| **Alertas** | Telegram Bot API + Email SMTP |
+| **MCP** | Servidor SSE + JSON-RPC (5 tools, 2 resources) |
+| **Dashboard** | SPA dark theme embutido na porta 7443 |
+| **Update** | `sparrow update check` e `sparrow update install` via Codeberg |
+| **Saúde** | Health check loop (restarta containers falhos, escala se necessário) |
 
 ## CLI Reference
 
@@ -121,6 +104,10 @@ sparrow alert history
 
 # MCP server (controle por IA)
 sparrow mcp
+
+# Update (via Codeberg releases)
+sparrow update check
+sparrow update install
 
 # Status
 sparrow status
@@ -188,8 +175,9 @@ docker run --rm codeberg.org/andeerc/sparrow:latest --help
 Baixe o binário da [última release](https://codeberg.org/andeerc/sparrow/releases):
 
 ```bash
-# Linux x86_64
-curl -L -o sparrow https://codeberg.org/andeerc/sparrow/releases/download/v0.1.0/sparrow-v0.1.0-x86_64-linux
+# Linux x86_64 — baixa a última release
+curl -L -o sparrow $(curl -s https://codeberg.org/api/v1/repos/andeerc/sparrow/releases/latest | \
+  grep -o '"browser_download_url":"[^"]*x86_64-linux"' | cut -d'"' -f4)
 chmod +x sparrow
 sudo mv sparrow /usr/local/bin/
 ```
@@ -256,16 +244,14 @@ EOF
 ./target/release/sparrow service rm hello
 ```
 
-## Próximos Passos
+## Roadmap
 
-1. **mTLS entre nodes** — segurança nas comunicações Raft/API
-2. **Openraft full integration** — testes de falha, eleição, snapshots
-3. **Reverse proxy TLS** — terminação HTTPS com Let's Encrypt
-4. **Autoscale com memória** — baseado em histórico, não apenas instantâneo
-5. **Alert dispatch real** — integração com Telegram/Email funcionando
-6. **Dashboard com WebSocket** — atualizações ao vivo sem polling
-7. **CLI completas** — node drain/rm, autoscale history, rolling update avançado
-8. **Testes end-to-end** — integração real com Podman em CI
+- **mTLS entre nodes** — cifrar comunicações Raft/API
+- **Snapshots Raft** — persistir estado compactado do cluster
+- **HTTPS no proxy** — terminação TLS com Let's Encrypt
+- **Autoscale preditivo** — baseado em histórico, não apenas instantâneo
+- **Dashboard com WebSocket** — atualizações ao vivo
+- **Testes end-to-end** — integração real com Podman em CI
 
 ## Licença
 

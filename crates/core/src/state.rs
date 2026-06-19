@@ -25,8 +25,12 @@ impl StateStore {
         Ok(store)
     }
 
+    fn conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))
+    }
+
     fn migrate(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS schema_version (
@@ -151,10 +155,52 @@ impl StateStore {
         Ok(())
     }
 
-    // ── Service CRUD ──
+    fn load_ports(&self, conn: &Connection, service_id: &str) -> anyhow::Result<Vec<PortMapping>> {
+        let mut stmt = conn.prepare(
+            "SELECT published, target, protocol FROM service_ports WHERE service_id = ?1",
+        )?;
+        let ports = stmt.query_map(params![service_id], |row| {
+            Ok(PortMapping {
+                published: row.get(0)?,
+                target: row.get(1)?,
+                protocol: {
+                    let p: String = row.get(2)?;
+                    serde_json::from_str(&format!("\"{p}\"")).unwrap_or_default()
+                },
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(ports)
+    }
+
+    fn load_env(&self, conn: &Connection, service_id: &str) -> anyhow::Result<Vec<EnvVar>> {
+        let mut stmt = conn.prepare(
+            "SELECT key, value FROM service_env WHERE service_id = ?1",
+        )?;
+        let env = stmt.query_map(params![service_id], |row| {
+            Ok(EnvVar { key: row.get(0)?, value: row.get(1)? })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(env)
+    }
+
+    fn load_volumes(&self, conn: &Connection, service_id: &str) -> anyhow::Result<Vec<VolumeMount>> {
+        let mut stmt = conn.prepare(
+            "SELECT source, target, read_only FROM service_volumes WHERE service_id = ?1",
+        )?;
+        let volumes = stmt.query_map(params![service_id], |row| {
+            let read_only: i32 = row.get(2)?;
+            Ok(VolumeMount { source: row.get(0)?, target: row.get(1)?, read_only: read_only != 0 })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(volumes)
+    }
 
     pub fn create_service(&self, spec: &ServiceSpec) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO services (id, name, image, desired_replicas, restart_policy, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -205,7 +251,7 @@ impl StateStore {
     }
 
     pub fn list_services(&self) -> anyhow::Result<Vec<ServiceSpec>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, image, desired_replicas, restart_policy, created_at, updated_at FROM services ORDER BY created_at DESC",
         )?;
@@ -214,32 +260,40 @@ impl StateStore {
             .query_map([], |row| {
                 let created: String = row.get(5)?;
                 let updated: String = row.get(6)?;
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?, row.get::<_, String>(4)?, created, updated))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(id, name, image, desired, rp, created, updated)| {
+                let ports = self.load_ports(&conn, &id).unwrap_or_default();
+                let env = self.load_env(&conn, &id).unwrap_or_default();
+                let volumes = self.load_volumes(&conn, &id).unwrap_or_default();
                 Ok(ServiceSpec {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    image: row.get(2)?,
-                    desired_replicas: row.get(3)?,
-                    ports: vec![],
-                    env: vec![],
-                    volumes: vec![],
+                    id, name, image,
+                    desired_replicas: desired,
+                    ports, env, volumes,
                     networks: vec![],
                     labels: std::collections::HashMap::new(),
                     resources: None,
-                    restart_policy: RestartPolicy::Always,
+                    restart_policy: match rp.as_str() {
+                        "Always" => RestartPolicy::Always,
+                        "OnFailure" => RestartPolicy::OnFailure,
+                        "No" => RestartPolicy::No,
+                        _ => RestartPolicy::Always,
+                    },
                     command: None,
                     autoscaling: None,
                     created_at: created.parse().unwrap_or_else(|_| Utc::now()),
                     updated_at: updated.parse().unwrap_or_else(|_| Utc::now()),
                 })
-            })?
-            .filter_map(|r| r.ok())
+            })
+            .filter_map(|r: anyhow::Result<ServiceSpec>| r.ok())
             .collect();
 
         Ok(services)
     }
 
-    pub fn get_service(&self, id_or_name: &str) -> anyhow::Result<Option<ServiceSpec>> {
-        let conn = self.conn.lock().unwrap();
+    pub fn get_service_with_conn(&self, conn: &Connection, id_or_name: &str) -> anyhow::Result<Option<ServiceSpec>> {
         let mut stmt = conn.prepare(
             "SELECT id, name, image, desired_replicas, restart_policy, created_at, updated_at
              FROM services WHERE id = ?1 OR name = ?1",
@@ -248,34 +302,45 @@ impl StateStore {
         let mut rows = stmt.query_map(params![id_or_name], |row| {
             let created: String = row.get(5)?;
             let updated: String = row.get(6)?;
-            Ok(ServiceSpec {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                image: row.get(2)?,
-                desired_replicas: row.get(3)?,
-                ports: vec![],
-                env: vec![],
-                volumes: vec![],
-                networks: vec![],
-                labels: std::collections::HashMap::new(),
-                resources: None,
-                restart_policy: RestartPolicy::Always,
-                command: None,
-                autoscaling: None,
-                created_at: created.parse().unwrap_or_else(|_| Utc::now()),
-                updated_at: updated.parse().unwrap_or_else(|_| Utc::now()),
-            })
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, u32>(3)?, row.get::<_, String>(4)?, created, updated))
         })?;
 
         match rows.next() {
-            Some(Ok(svc)) => Ok(Some(svc)),
+            Some(Ok((id, name, image, desired, rp, created, updated))) => {
+                let ports = self.load_ports(conn, &id).unwrap_or_default();
+                let env = self.load_env(conn, &id).unwrap_or_default();
+                let volumes = self.load_volumes(conn, &id).unwrap_or_default();
+                Ok(Some(ServiceSpec {
+                    id, name, image,
+                    desired_replicas: desired,
+                    ports, env, volumes,
+                    networks: vec![],
+                    labels: std::collections::HashMap::new(),
+                    resources: None,
+                    restart_policy: match rp.as_str() {
+                        "Always" => RestartPolicy::Always,
+                        "OnFailure" => RestartPolicy::OnFailure,
+                        "No" => RestartPolicy::No,
+                        _ => RestartPolicy::Always,
+                    },
+                    command: None,
+                    autoscaling: None,
+                    created_at: created.parse().unwrap_or_else(|_| Utc::now()),
+                    updated_at: updated.parse().unwrap_or_else(|_| Utc::now()),
+                }))
+            }
             _ => Ok(None),
         }
     }
 
+    pub fn get_service(&self, id_or_name: &str) -> anyhow::Result<Option<ServiceSpec>> {
+        let conn = self.conn()?;
+        self.get_service_with_conn(&conn, id_or_name)
+    }
+
     pub fn delete_service(&self, id_or_name: &str) -> anyhow::Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        // First get the service id if name was given
+        let conn = self.conn()?;
         let svc = {
             let mut stmt = conn.prepare("SELECT id FROM services WHERE id = ?1 OR name = ?1")?;
             let mut rows = stmt.query_map(params![id_or_name], |row| row.get::<_, String>(0))?;
@@ -283,6 +348,10 @@ impl StateStore {
         };
 
         if let Some(svc_id) = svc {
+            conn.execute("DELETE FROM service_ports WHERE service_id = ?1", params![svc_id])?;
+            conn.execute("DELETE FROM service_env WHERE service_id = ?1", params![svc_id])?;
+            conn.execute("DELETE FROM service_volumes WHERE service_id = ?1", params![svc_id])?;
+            conn.execute("DELETE FROM service_networks WHERE service_id = ?1", params![svc_id])?;
             conn.execute("DELETE FROM services WHERE id = ?1", params![svc_id])?;
             Ok(true)
         } else {
@@ -291,7 +360,7 @@ impl StateStore {
     }
 
     pub fn update_replicas(&self, id_or_name: &str, replicas: u32) -> anyhow::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
         let affected = conn.execute(
             "UPDATE services SET desired_replicas = ?1, updated_at = ?2 WHERE id = ?3 OR name = ?3",
@@ -310,7 +379,7 @@ impl StateStore {
         replica_seq: u32,
         state: &str,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR REPLACE INTO containers (container_name, service_id, image, replica_seq, state, created_at)
@@ -321,7 +390,7 @@ impl StateStore {
     }
 
     pub fn update_container_state(&self, container_name: &str, state: &str) -> anyhow::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let affected = conn.execute(
             "UPDATE containers SET state = ?1 WHERE container_name = ?2",
             params![state, container_name],
@@ -330,7 +399,7 @@ impl StateStore {
     }
 
     pub fn get_service_containers(&self, service_id: &str) -> anyhow::Result<Vec<ContainerStatus>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT container_name, service_id, image, replica_seq, state, created_at, node_id
              FROM containers WHERE service_id = ?1 ORDER BY replica_seq",
@@ -375,7 +444,7 @@ impl StateStore {
         config: &AutoscalingConfig,
         paused: bool,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT OR REPLACE INTO autoscale_config
              (service_id, min_replicas, max_replicas, cpu_target_percent, mem_target_percent, cooldown_seconds, paused)
@@ -394,7 +463,7 @@ impl StateStore {
     }
 
     pub fn get_autoscale(&self, service_id: &str) -> anyhow::Result<Option<(AutoscalingConfig, bool)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT min_replicas, max_replicas, cpu_target_percent, mem_target_percent, cooldown_seconds, paused
              FROM autoscale_config WHERE service_id = ?1",
@@ -425,7 +494,7 @@ impl StateStore {
         replicas_to: u32,
         reason: &str,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO autoscale_events (service_id, decision, replicas_from, replicas_to, reason, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -435,7 +504,7 @@ impl StateStore {
     }
 
     pub fn list_autoscale_events(&self, service_id: &str, limit: u32) -> anyhow::Result<Vec<AutoscaleEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT decision, replicas_from, replicas_to, reason, created_at
              FROM autoscale_events WHERE service_id = ?1 ORDER BY created_at DESC LIMIT ?2",
@@ -455,7 +524,7 @@ impl StateStore {
     }
 
     pub fn list_alert_rules(&self) -> anyhow::Result<Vec<AlertRule>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, metric, operator, threshold, duration_secs, enabled, created_at
              FROM alert_rules ORDER BY created_at DESC",
@@ -487,7 +556,7 @@ impl StateStore {
         message: &str,
         severity: &str,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO alert_events (channel_id, channel_type, metric, value, threshold, message, severity, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', ?8)",
@@ -506,7 +575,7 @@ impl StateStore {
     }
 
     pub fn list_alert_events(&self, limit: u32) -> anyhow::Result<Vec<AlertEventRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT channel_id, channel_type, metric, value, threshold, message, severity, status, created_at
              FROM alert_events ORDER BY created_at DESC LIMIT ?1",
@@ -537,7 +606,7 @@ impl StateStore {
         config_json: &str,
         enabled: bool,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO alert_channels (id, channel_type, name, config_json, enabled, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -554,7 +623,7 @@ impl StateStore {
     }
 
     pub fn list_alert_channels(&self) -> anyhow::Result<Vec<AlertChannelRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, channel_type, name, config_json, enabled, created_at
              FROM alert_channels ORDER BY created_at DESC",

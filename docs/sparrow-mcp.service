@@ -9,9 +9,15 @@ Type=simple
 ExecStart=/usr/local/bin/sparrow mcp --host 127.0.0.1 --port 3000
 Restart=on-failure
 RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
 
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sparrow /var/log/sparrow
+MemoryMax=512M
 
 User=%i
 Group=%i

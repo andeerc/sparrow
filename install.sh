@@ -8,7 +8,12 @@ set -euo pipefail
 #   curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash -s -- --systemd
 # ───────────────────────────────────────────────────────────────────
 
-VERSION="${SPARROW_VERSION:-0.2.1}"
+VERSION="${SPARROW_VERSION:-}"
+if [[ -z "$VERSION" ]]; then
+  VERSION=$(curl -sfL "https://codeberg.org/api/v1/repos/andeerc/sparrow/releases/latest" 2>/dev/null \
+    | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4 | sed 's/^v//')
+fi
+VERSION="${VERSION:-0.2.4}"
 ARCH="$(uname -m)"
 OS="linux"
 BIN_URL="https://codeberg.org/andeerc/sparrow/releases/download/v${VERSION}/sparrow-v${VERSION}-${ARCH}-${OS}"

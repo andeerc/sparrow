@@ -33,9 +33,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Utils ──
-info()  { printf "  [ .. ] %s\n" "$*"; }
-ok()    { printf "  [ OK ] %s\n" "$*"; }
-fail()  { printf "  [FAIL] %s\n" "$*"; exit 1; }
+info()  { printf "  [ .. ] %s\n" "$*" >&2; }
+ok()    { printf "  [ OK ] %s\n" "$*" >&2; }
+fail()  { printf "  [FAIL] %s\n" "$*" >&2; exit 1; }
 
 # ── Pré-requisitos ──
 check_prereqs() {

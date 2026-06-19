@@ -73,8 +73,22 @@ pub enum Command {
         action: ConfigAction,
     },
 
+    /// Check for updates and upgrade Sparrow
+    Update {
+        #[command(subcommand)]
+        action: UpdateAction,
+    },
+
     /// Show cluster status
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UpdateAction {
+    /// Check if a new version is available
+    Check,
+    /// Download and install the latest version
+    Install,
 }
 
 #[derive(Subcommand, Debug)]
@@ -630,5 +644,17 @@ mod tests {
         // --version is handled by clap before reaching our parse, just verify help works
         let result = Cli::try_parse_from(&["sparrow", "status"]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_update_check() {
+        let cmd = parse(&["sparrow", "update", "check"]);
+        assert!(matches!(&cmd, Command::Update { action: UpdateAction::Check }));
+    }
+
+    #[test]
+    fn test_parse_update_install() {
+        let cmd = parse(&["sparrow", "update", "install"]);
+        assert!(matches!(&cmd, Command::Update { action: UpdateAction::Install }));
     }
 }

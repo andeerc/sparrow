@@ -2177,11 +2177,13 @@ dependencies = [
 
 [[package]]
 name = "sparrow"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "reqwest",
+ "serde",
  "serde_json",
  "sparrow-api",
  "sparrow-core",
@@ -2196,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2215,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2238,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2256,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-podman"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2269,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2278,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-raft"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

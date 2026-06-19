@@ -6,13 +6,15 @@ use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
 use sparrow_core::autoscale::AutoscaleEngine;
-use sparrow_core::cli::{Cli, Command, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction, ConfigAction};
+use sparrow_core::cli::{Cli, Command, UpdateAction, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction, ConfigAction};
 use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
 use sparrow_podman::PodmanRuntime;
 use sparrow_proto::*;
 use sparrow_api::init_cluster;
 use sparrow_mcp::start_mcp;
+
+mod update;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -200,6 +202,9 @@ async fn main() -> anyhow::Result<()> {
 
         // Config handled in early return above
         Command::Config { .. } => unreachable!(),
+
+        // ── Update Commands (Fase 4) ──
+        Command::Update { action } => handle_update(action).await?,
     }
 
     Ok(())
@@ -1014,6 +1019,50 @@ async fn handle_alert(action: AlertAction, state: &StateStore) -> anyhow::Result
                     ]
                 }).collect();
                 print_table(&["TIME", "SEVERITY", "CHANNEL", "MESSAGE"], rows);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Update Handler (Fase 4) ──
+
+async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
+    match action {
+        UpdateAction::Check => {
+            println!("🔍 Checking for updates...");
+            match update::check().await {
+                Ok(Some(info)) => {
+                    println!("📦 Update available:");
+                    println!("   Current:  {}", info.current_tag);
+                    println!("   Latest:   {}", info.latest_tag);
+                    println!("   Size:     {} bytes", info.download_size);
+                    println!("   URL:      {}", info.html_url);
+                    println!("\nRun `sparrow update install` to upgrade.");
+                }
+                Ok(None) => {
+                    println!("✅ You are running the latest version ({}).", env!("CARGO_PKG_VERSION"));
+                }
+                Err(e) => {
+                    eprintln!("❌ Update check failed: {e}");
+                }
+            }
+        }
+        UpdateAction::Install => {
+            println!("🔍 Checking for latest version...");
+            match update::check().await {
+                Ok(Some(info)) => {
+                    println!("📦 Installing {} -> {} ...", info.current_tag, info.latest_tag);
+                    if let Err(e) = update::install(&info.download_url).await {
+                        eprintln!("❌ Update failed: {e}");
+                    }
+                }
+                Ok(None) => {
+                    println!("✅ Already up-to-date ({}).", env!("CARGO_PKG_VERSION"));
+                }
+                Err(e) => {
+                    eprintln!("❌ Update check failed: {e}");
+                }
             }
         }
     }

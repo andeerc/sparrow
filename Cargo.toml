@@ -11,7 +11,7 @@ members = [
 
 [package]
 name = "sparrow"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
 description = "Container orchestrator - simple as Swarm, safe as Podman, fast as Rust"
 
@@ -30,3 +30,5 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 anyhow = "1"
 dirs = "5"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

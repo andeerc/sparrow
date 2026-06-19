@@ -14,6 +14,7 @@ pub mod alerts;
 pub mod autoscale;
 pub mod cli;
 pub mod config;
+pub mod crypto;
 pub mod deploy;
 pub mod error;
 pub mod state;

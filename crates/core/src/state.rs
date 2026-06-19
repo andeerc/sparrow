@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use sparrow_proto::*;
 use std::path::Path;
 use std::sync::Mutex;
+use crate::crypto;
 
 pub struct StateStore {
     conn: Mutex<Connection>,
@@ -647,6 +648,7 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         enabled: bool,
     ) -> anyhow::Result<()> {
         let conn = self.conn()?;
+        let encrypted = crypto::encrypt(config_json, "sparrow-alert-key");
         conn.execute(
             "INSERT INTO alert_channels (id, channel_type, name, config_json, enabled, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -654,7 +656,7 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
                 id,
                 channel_type,
                 name,
-                config_json,
+                encrypted,
                 enabled as i32,
                 Utc::now().to_rfc3339(),
             ],
@@ -669,11 +671,14 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
              FROM alert_channels ORDER BY created_at DESC",
         )?;
         let channels = stmt.query_map([], |row| {
+            let encrypted: String = row.get(3)?;
+            let decrypted = crypto::decrypt(&encrypted, "sparrow-alert-key")
+                .unwrap_or_else(|| encrypted.clone());
             Ok(AlertChannelRecord {
                 id: row.get(0)?,
                 channel_type: row.get(1)?,
                 name: row.get(2)?,
-                config_json: row.get(3)?,
+                config_json: decrypted,
                 enabled: row.get::<_, i32>(4)? != 0,
                 created_at: row.get(5)?,
             })

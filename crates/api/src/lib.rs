@@ -148,6 +148,30 @@ async fn rate_limit_check(
     next.run(request).await
 }
 
+/// GET /metrics – Prometheus endpoint exposing internal metrics
+async fn metrics(State(state): State<SharedAppState>) -> String {
+    let mut output = String::new();
+    output.push_str("# HELP sparrow_services_total Total number of services\n");
+    output.push_str("# TYPE sparrow_services_total gauge\n");
+    let services = state.state_store.as_ref()
+        .and_then(|s| s.list_services().ok())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    output.push_str(&format!("sparrow_services_total {services}\n"));
+
+    output.push_str("# HELP sparrow_nodes_total Total number of cluster nodes\n");
+    output.push_str("# TYPE sparrow_nodes_total gauge\n");
+    let nodes = state.cluster.read().await.nodes.len();
+    output.push_str(&format!("sparrow_nodes_total {nodes}\n"));
+
+    output.push_str("# HELP sparrow_proxy_routes_total Number of proxy routes\n");
+    output.push_str("# TYPE sparrow_proxy_routes_total gauge\n");
+    let routes = state.proxy_routes.read().await.len();
+    output.push_str(&format!("sparrow_proxy_routes_total {routes}\n"));
+
+    output
+}
+
 pub async fn start_api(
     state: SharedAppState,
     listen: &str,
@@ -170,6 +194,7 @@ pub async fn start_api(
         .route("/api/v1/services/{id}", get(service_get))
         .route("/api/v1/services/{id}", delete(service_delete))
         .route("/api/v1/services/{id}/scale", post(service_scale))
+        .route("/metrics", get(metrics))
         .route("/api/v1/alerts/channels", get(alert_channels_list))
         .route("/api/v1/alerts/channels", post(alert_channels_add))
         .route("/api/v1/alerts/events", get(alert_events_list))

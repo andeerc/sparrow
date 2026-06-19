@@ -2,6 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
+use clap::CommandFactory;
+use clap_complete::{generate, Shell};
 use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
@@ -205,6 +207,16 @@ async fn main() -> anyhow::Result<()> {
 
         // ── Update Commands (Fase 4) ──
         Command::Update { action } => handle_update(action).await?,
+
+        // ── Shell Completion ──
+        Command::Completion { shell } => {
+            let shell: Shell = shell.parse().map_err(|_| {
+                anyhow::anyhow!("Invalid shell: {shell}. Use: bash, zsh, fish, powershell, elvish")
+            })?;
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, name, &mut std::io::stdout());
+        }
     }
 
     Ok(())

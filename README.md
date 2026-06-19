@@ -170,6 +170,18 @@ docker pull codeberg.org/andeerc/sparrow:latest
 docker run --rm codeberg.org/andeerc/sparrow:latest --help
 ```
 
+### Installer (recomendado)
+
+```bash
+curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash
+```
+
+Ou com systemd services:
+
+```bash
+curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash -s -- --systemd
+```
+
 ### Binário (Releases)
 
 Baixe o binário da [última release](https://codeberg.org/andeerc/sparrow/releases):
@@ -188,7 +200,7 @@ sudo mv sparrow /usr/local/bin/
 git clone https://codeberg.org/andeerc/sparrow.git
 cd sparrow
 cargo build --release
-sudo cp target/release/sparrow /usr/local/bin/
+./install.sh    # copia binário + configura completions + config
 ```
 
 ## Quickstart

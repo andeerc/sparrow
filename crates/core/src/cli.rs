@@ -79,6 +79,12 @@ pub enum Command {
         action: UpdateAction,
     },
 
+    /// Generate shell completion script
+    Completion {
+        /// Shell type: bash, zsh, fish, powershell, elvish
+        shell: String,
+    },
+
     /// Show cluster status
     Status,
 }

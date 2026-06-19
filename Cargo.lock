@@ -489,6 +489,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0a7a9bfdb35811f9e59832f0f05975114d2251b415fb534108e6f34060fd772"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2177,10 +2186,11 @@ dependencies = [
 
 [[package]]
 name = "sparrow"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "dirs",
  "reqwest",
  "serde",
@@ -2198,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2217,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2240,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2258,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-podman"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2271,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2280,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-raft"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",

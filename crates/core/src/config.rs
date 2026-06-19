@@ -88,7 +88,16 @@ pub struct LoggingConfig {
 
     #[serde(default)]
     pub file: Option<String>,
+
+    #[serde(default = "default_max_log_size")]
+    pub max_size_mb: u64,
+
+    #[serde(default = "default_log_retention")]
+    pub retention_days: u32,
 }
+
+fn default_max_log_size() -> u64 { 100 }
+fn default_log_retention() -> u32 { 30 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
@@ -96,6 +105,8 @@ impl Default for LoggingConfig {
             level: default_log_level(),
             format: String::from("plain"),
             file: None,
+            max_size_mb: default_max_log_size(),
+            retention_days: default_log_retention(),
         }
     }
 }

@@ -382,9 +382,11 @@ async fn handle_config(action: &ConfigAction, config_path: &Path) -> anyhow::Res
                     ("Runtime", &cfg.runtime.backend),
                     ("Rootless", if cfg.runtime.rootless { "yes" } else { "no" }),
                     ("Socket", if cfg.runtime.podman_socket.is_empty() { "default" } else { &cfg.runtime.podman_socket }),
-                    ("Log level", &cfg.logging.level),
-                    ("Log format", &cfg.logging.format),
-                    ("Log file", cfg.logging.file.as_deref().unwrap_or("stdout")),
+            ("Log level", &cfg.logging.level),
+            ("Log format", &cfg.logging.format),
+            ("Log file", cfg.logging.file.as_deref().unwrap_or("stdout")),
+            ("Log max size (MB)", &cfg.logging.max_size_mb.to_string()),
+            ("Log retention (days)", &cfg.logging.retention_days.to_string()),
                     ("API listen", &cfg.api.listen),
                 ]);
             }

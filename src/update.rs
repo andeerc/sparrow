@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
+use tracing::warn;
 
 const REPO_OWNER: &str = "andeerc";
 const REPO_NAME: &str = "sparrow";
@@ -148,11 +149,11 @@ fn restart_systemd(user: &str) {
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            eprintln!("  ⚠️  Failed to restart {service}: {stderr}");
+            warn!("Failed to restart {service}: {stderr}");
             eprintln!("  Run manually: sudo systemctl restart {service}");
         }
         Err(_) => {
-            eprintln!("  ℹ️  systemctl not available. Restart Sparrow manually.");
+            warn!("systemctl not available. Restart Sparrow manually.");
         }
     }
 }

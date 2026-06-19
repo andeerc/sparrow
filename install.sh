@@ -89,6 +89,30 @@ download_binary() {
   info "Baixando sparrow v${VERSION} (${ARCH}-${OS})..."
   if curl -sfL "$BIN_URL" -o "$tmpbin" 2>/dev/null; then
     chmod +x "$tmpbin"
+
+    # Verify checksum if available
+    local checksum_url="${BIN_URL}.sha256"
+    if curl -sfL "$checksum_url" -o "${tmpbin}.sha256" 2>/dev/null; then
+      if command -v sha256sum &>/dev/null; then
+        if sha256sum -c "${tmpbin}.sha256" --status 2>/dev/null; then
+          ok "Checksum verified"
+        else
+          fail "Checksum mismatch! Binary may be corrupted."
+        fi
+      elif command -v shasum &>/dev/null; then
+        if shasum -a 256 -c "${tmpbin}.sha256" --status 2>/dev/null; then
+          ok "Checksum verified"
+        else
+          fail "Checksum mismatch! Binary may be corrupted."
+        fi
+      else
+        info "No sha256sum/shsum available, skipping checksum verification"
+      fi
+      rm -f "${tmpbin}.sha256"
+    else
+      info "No checksum file found, skipping verification"
+    fi
+
     ok "Download concluido"
     echo "$tmpbin"
     return

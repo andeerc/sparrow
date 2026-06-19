@@ -5,6 +5,7 @@ use clap::Parser;
 use clap::CommandFactory;
 use clap_complete::{generate, Shell};
 use tokio::time::{sleep, Duration};
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 
 use sparrow_core::autoscale::AutoscaleEngine;
@@ -166,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("📦 Deploying '{}' ({} replicas of {})...", spec.name, spec.desired_replicas, spec.image);
 
                     if !podman_ok {
-                        eprintln!("❌ Podman not available");
+                        error!("❌ Podman not available (verify Podman is installed)");
                         return Ok(());
                     }
 
@@ -188,10 +189,12 @@ async fn main() -> anyhow::Result<()> {
 
                     // Run containers
                     let mut success = 0u32;
+                    let ports_base = &spec.ports;
+                    let env_base = &spec.env;
                     for i in 1..=spec.desired_replicas {
                         let cname = format!("{}-{}", spec.name, i);
-                        let ports: Vec<PortMapping> = spec.ports.clone();
-                        let env_refs: Vec<(String, String)> = spec.env.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
+                        let ports: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
+                        let env_refs: Vec<(String, String)> = env_base.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
                         match runtime.run_container(&cname, &spec.image, &ports, &env_refs, &std::collections::HashMap::new()).await {
                             Ok(cid) => {
                                 state.record_container(&cname, &spec.id, &spec.image, i, "Running")?;
@@ -216,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
 
                     println!("🎯 Deploy complete: {}/{} replicas running", success, spec.desired_replicas);
                 }
-                Err(e) => eprintln!("❌ Deploy failed: {e}"),
+                Err(e) => error!("❌ Deploy failed: {e}"),
             }
         }
 
@@ -501,7 +504,7 @@ async fn handle_service(
     match action {
         ServiceAction::Create { name, image, replicas, port, env, volume: _, network: _, restart: _, domain: _, autoscale: _ } => {
             if !podman_ok {
-                eprintln!("❌ Podman not available");
+                error!("❌ Podman not available (verify Podman is installed)");
                 std::process::exit(1);
             }
 
@@ -549,10 +552,12 @@ async fn handle_service(
 
             // Run containers
             let mut success = 0u32;
+            let ports_base = spec.ports.clone();
+            let env_base = spec.env.clone();
             for i in 1..=replicas {
                 let container_name = format!("{}-{}", name, i);
-                let port_refs: Vec<PortMapping> = spec.ports.clone();
-                let env_refs: Vec<(String, String)> = spec.env.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
+                let port_refs: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
+                let env_refs: Vec<(String, String)> = env_base.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
                 let labels = std::collections::HashMap::new();
 
                 match runtime.run_container(&container_name, &image, &port_refs, &env_refs, &labels).await {
@@ -612,7 +617,7 @@ async fn handle_service(
                         print_table(&["CONTAINER", "STATUS", "CPU", "MEM"], rows);
                     }
                 }
-                None => eprintln!("❌ Service '{name}' not found"),
+                None => error!("❌ Service '{name}' not found"),
             }
         }
 
@@ -631,16 +636,16 @@ async fn handle_service(
                         }
                     }
                 }
-                Err(e) => eprintln!("❌ Inspect failed: {e}"),
+                Err(e) => error!("❌ Inspect failed: {e}"),
             }
         }
 
         ServiceAction::Scale { name, replicas } => {
-            if !podman_ok { eprintln!("❌ Podman unavailable"); return Ok(()); }
+            if !podman_ok { error!("❌ Podman unavailable"); return Ok(()); }
 
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{name}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
             };
 
             let current = runtime.list_containers(&svc.name).await?.len() as u32;
@@ -682,11 +687,11 @@ async fn handle_service(
         }
 
         ServiceAction::Rm { name } => {
-            if !podman_ok { eprintln!("❌ Podman unavailable"); return Ok(()); }
+            if !podman_ok { error!("❌ Podman unavailable"); return Ok(()); }
 
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{name}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
             };
 
             let containers = runtime.list_containers(&svc.name).await?;
@@ -707,11 +712,11 @@ async fn handle_service(
         }
 
         ServiceAction::Logs { name, tail, follow } => {
-            if !podman_ok { eprintln!("❌ Podman unavailable"); return Ok(()); }
+            if !podman_ok { error!("❌ Podman unavailable"); return Ok(()); }
 
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{name}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
             };
 
             let containers = runtime.list_containers(&svc.name).await?;
@@ -767,12 +772,12 @@ async fn handle_service(
             println!("🔄 Updating '{name}' (par={parallelism}, delay={delay})...");
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{name}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
             };
 
             let new_image = match image {
                 Some(ref img) => img.clone(),
-                None => { eprintln!("❌ No --image specified for update"); return Ok(()); }
+                None => { error!("❌ No --image specified for update"); return Ok(()); }
             };
 
             // Simple rolling update: create new, remove old, one by one
@@ -842,7 +847,7 @@ async fn handle_node(action: NodeAction, state: &StateStore, cluster_state: &Opt
                 println!("  Containers running: {total}");
                 println!("  Status: Ready");
             } else {
-                eprintln!("❌ Node '{name}' not found in cluster");
+                error!("❌ Node '{name}' not found in cluster");
             }
         }
         NodeAction::Drain { name } => {
@@ -862,10 +867,10 @@ async fn handle_node(action: NodeAction, state: &StateStore, cluster_state: &Opt
                     }
                     println!("✅ Node '{name}' drained");
                 } else {
-                    eprintln!("❌ Node '{name}' not found in cluster");
+                    error!("❌ Node '{name}' not found in cluster");
                 }
             } else {
-                eprintln!("❌ Drain requires multi-node cluster (init with `sparrow cluster init`)");
+                error!("❌ Drain requires multi-node cluster (init with `sparrow cluster init`)");
             }
         }
         NodeAction::Rm { name } => {
@@ -875,12 +880,12 @@ async fn handle_node(action: NodeAction, state: &StateStore, cluster_state: &Opt
                     cluster.nodes.remove(&name);
                     println!("✅ Node '{name}' removed from cluster");
                 } else if name == "localhost" || name == "self" {
-                    eprintln!("❌ Cannot remove self node");
+                    error!("❌ Cannot remove self node");
                 } else {
-                    eprintln!("❌ Node '{name}' not found in cluster");
+                    error!("❌ Node '{name}' not found in cluster");
                 }
             } else {
-                eprintln!("❌ Remove requires multi-node cluster (init with `sparrow cluster init`)");
+                error!("❌ Remove requires multi-node cluster (init with `sparrow cluster init`)");
             }
         }
     }
@@ -941,7 +946,7 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
         AutoscaleAction::Set { service, min, max, cpu_target, mem_target, cooldown } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{service}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
             };
 
             let config = AutoscalingConfig {
@@ -962,7 +967,7 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
         AutoscaleAction::Status { service } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{service}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
             };
             match state.get_autoscale(&svc.id)? {
                 Some((config, paused)) => {
@@ -978,7 +983,7 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
         AutoscaleAction::History { service, last } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{service}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
             };
             let limit: u32 = last.parse().unwrap_or(10);
             let events = state.list_autoscale_events(&svc.id, limit)?;
@@ -999,25 +1004,25 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
         AutoscaleAction::Pause { service } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{service}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
             };
             if let Some((config, _)) = state.get_autoscale(&svc.id)? {
                 state.set_autoscale(&svc.id, &config, true)?;
                 println!("⏸ Autoscale paused for '{}'", svc.name);
             } else {
-                eprintln!("❌ No autoscale config for '{}'", svc.name);
+                error!("❌ No autoscale config for '{}'", svc.name);
             }
         }
         AutoscaleAction::Resume { service } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { eprintln!("❌ Service '{service}' not found"); return Ok(()); }
+                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
             };
             if let Some((config, _)) = state.get_autoscale(&svc.id)? {
                 state.set_autoscale(&svc.id, &config, false)?;
                 println!("▶ Autoscale resumed for '{}'", svc.name);
             } else {
-                eprintln!("❌ No autoscale config for '{}'", svc.name);
+                error!("❌ No autoscale config for '{}'", svc.name);
             }
         }
     }
@@ -1112,7 +1117,7 @@ async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
                     println!("✅ You are running the latest version ({}).", env!("CARGO_PKG_VERSION"));
                 }
                 Err(e) => {
-                    eprintln!("❌ Update check failed: {e}");
+                    error!("❌ Update check failed: {e}");
                 }
             }
         }
@@ -1122,14 +1127,14 @@ async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
                 Ok(Some(info)) => {
                     println!("📦 Installing {} -> {} ...", info.current_tag, info.latest_tag);
                     if let Err(e) = update::install(&info.download_url).await {
-                        eprintln!("❌ Update failed: {e}");
+                        error!("❌ Update failed: {e}");
                     }
                 }
                 Ok(None) => {
                     println!("✅ Already up-to-date ({}).", env!("CARGO_PKG_VERSION"));
                 }
                 Err(e) => {
-                    eprintln!("❌ Update check failed: {e}");
+                    error!("❌ Update check failed: {e}");
                 }
             }
         }

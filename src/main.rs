@@ -181,7 +181,15 @@ async fn main() -> anyhow::Result<()> {
             let app_state = cluster_state.clone().unwrap_or_else(|| {
                 init_cluster(cluster_name, "localhost", &format!("{host}:{port}"), None)
             });
-            let addr = format!("{host}:{port}");
+            // Resolve hostname to IP (SocketAddr doesn't accept hostnames)
+            let addr = if host == "localhost" {
+                format!("127.0.0.1:{port}")
+            } else {
+                match tokio::net::lookup_host((host.as_str(), port)).await {
+                    Ok(mut addrs) => addrs.next().map(|a| a.to_string()).unwrap_or_else(|| format!("127.0.0.1:{port}")),
+                    Err(_) => format!("127.0.0.1:{port}"),
+                }
+            };
             println!("🔌 Starting MCP server on {addr}...");
             start_mcp(app_state, state.clone(), runtime.clone(), &addr).await?;
         }

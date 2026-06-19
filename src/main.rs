@@ -425,7 +425,7 @@ async fn handle_cluster(
             };
             raft_cluster.init().await?;
 
-            let app_state = sparrow_api::init_cluster(&name, "localhost", addr, Some(raft_cluster));
+            let app_state = sparrow_api::init_cluster_with_auth(&name, "localhost", addr, Some(raft_cluster), config.api.auth_token.clone());
             let cs_clone = app_state.clone();
             let listen_addr = addr.to_string();
             let tls_cert = config.cluster.tls_cert.clone();

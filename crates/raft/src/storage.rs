@@ -96,7 +96,7 @@ impl RaftLogReader<C> for StoredRaftLog {
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT term, node_id, committed FROM raft_hard_state WHERE id = 1")
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         let result: Result<(u64, u64, i32), _> =
             stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)));
@@ -148,7 +148,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
             "UPDATE raft_hard_state SET term = ?1, node_id = ?2, committed = ?3 WHERE id = 1",
             params![term, node_id, committed],
         )
-        .map_err(|e| io::Error::other(e))?;
+        .map_err(io::Error::other)?;
         Ok(())
     }
 
@@ -207,7 +207,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
             "UPDATE raft_committed SET log_index = ?1 WHERE id = 1",
             params![idx],
         )
-        .map_err(|e| io::Error::other(e))?;
+        .map_err(io::Error::other)?;
         Ok(())
     }
 
@@ -215,7 +215,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT log_index FROM raft_committed WHERE id = 1")
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         let idx: Result<Option<u64>, _> = stmt.query_row([], |row| row.get(0));
         match idx {
@@ -307,7 +307,7 @@ impl RaftSnapshotBuilder<C> for SnapshotBuilder {
         };
 
         let data = bincode::serialize(&state)
-            .map_err(|e| io::Error::other(e))?;
+            .map_err(io::Error::other)?;
 
         let snapshot_id = format!(
             "{}-{}-{}",

@@ -116,11 +116,17 @@ pub struct ApiConfig {
     #[serde(default = "default_api_listen")]
     pub listen: String,
 
+    /// TLS certificate path for the API server
     #[serde(default)]
     pub tls_cert: Option<String>,
 
+    /// TLS key path for the API server
     #[serde(default)]
     pub tls_key: Option<String>,
+
+    /// Bearer token for API authentication (optional)
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -129,6 +135,7 @@ impl Default for ApiConfig {
             listen: default_api_listen(),
             tls_cert: None,
             tls_key: None,
+            auth_token: None,
         }
     }
 }
@@ -173,11 +180,14 @@ impl Default for SparrowConfig {
                 level: "info".to_string(),
                 format: "plain".to_string(),
                 file: None,
+                max_size_mb: 100,
+                retention_days: 30,
             },
             api: ApiConfig {
                 listen: "127.0.0.1:7443".to_string(),
                 tls_cert: None,
                 tls_key: None,
+                auth_token: None,
             },
         }
     }

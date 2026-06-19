@@ -92,8 +92,8 @@ pub struct AppState {
     pub alerts: RwLock<AlertState>,
     pub raft_cluster: RwLock<Option<std::sync::Arc<sparrow_raft::RaftCluster>>>,
     pub state_store: Option<Arc<StateStore>>,
-    /// Rate limiter: IP -> (window_start, request_count)
     pub rate_limiter: RwLock<HashMap<String, (Instant, u64)>>,
+    pub auth_token: Option<String>,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -122,6 +122,21 @@ async fn rate_limit_check(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    if let Some(ref expected) = state.auth_token {
+        let provided = request
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if provided != *expected {
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({
+                "error": "unauthorized", "message": "invalid or missing Bearer token"
+            }))).into_response();
+        }
+    }
+
+    // Rate limiting
     let client_ip = request
         .headers()
         .get("x-forwarded-for")
@@ -470,6 +485,16 @@ pub fn init_cluster(
     addr: &str,
     raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
 ) -> SharedAppState {
+    init_cluster_with_auth(name, node_name, addr, raft_cluster, None)
+}
+
+pub fn init_cluster_with_auth(
+    name: &str,
+    node_name: &str,
+    addr: &str,
+    raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
+    auth_token: Option<String>,
+) -> SharedAppState {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let cluster = ClusterState {
@@ -498,6 +523,7 @@ pub fn init_cluster(
         raft_cluster: RwLock::new(raft_cluster),
         state_store: None,
         rate_limiter: RwLock::new(HashMap::new()),
+        auth_token,
     })
 }
 

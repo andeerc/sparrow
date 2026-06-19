@@ -46,13 +46,22 @@ impl ProxyService {
     }
 
     pub async fn forward(&self, req: Request) -> Result<Response, StatusCode> {
-        let host = req
-            .headers()
+        let is_ws = req.headers().get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_lowercase().contains("websocket"))
+            .unwrap_or(false);
+
+        let host = req.headers()
             .get(header::HOST)
             .and_then(|v| v.to_str().ok())
-            .ok_or(StatusCode::BAD_REQUEST)?;
+            .ok_or(StatusCode::BAD_REQUEST)?
+            .to_string();
 
-        let route = self.find_route(host).await.ok_or(StatusCode::NOT_FOUND)?;
+        if is_ws {
+            return self.forward_ws(req, &host).await;
+        }
+
+        let route = self.find_route(&host).await.ok_or(StatusCode::NOT_FOUND)?;
         let (target_host, target_port) = self.resolve_target(&route).await;
 
         let uri = format!("http://{target_host}:{target_port}{}", req.uri());
@@ -65,40 +74,13 @@ impl ProxyService {
             .map_err(|_| StatusCode::BAD_GATEWAY)?
             .to_bytes();
 
-        let mut headers = parts.headers.clone();
-        headers.remove(header::HOST);
-        headers.insert(
+        let mut headers_fwd = parts.headers.clone();
+        headers_fwd.remove(header::HOST);
+        headers_fwd.insert(
             header::HOST,
             format!("{target_host}:{target_port}")
                 .parse()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        );
-
-        let client_ip = parts
-            .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_string());
-
-        if let Some(ip) = client_ip {
-            let forwarded = headers
-                .get("x-forwarded-for")
-                .map(|v| format!("{}, {}", v.to_str().unwrap_or(""), ip))
-                .unwrap_or_else(|| ip);
-            headers.insert(
-                "x-forwarded-for",
-                forwarded.parse().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-            );
-        } else if !headers.contains_key("x-forwarded-for") {
-            headers.insert(
-                "x-forwarded-for",
-                header::HeaderValue::from_static("unknown"),
-            );
-        }
-
-        let scheme = parts.uri.scheme_str().unwrap_or("http");
-        headers.insert(
-            "x-forwarded-proto",
-            scheme.parse().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         );
 
         let forward_req = hyper::Request::builder()
@@ -107,14 +89,32 @@ impl ProxyService {
             .body(Full::new(body_bytes))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let resp = self
-            .client
-            .request(forward_req)
+        let resp = self.client.request(forward_req).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let (resp_parts, resp_body) = resp.into_parts();
+        Ok(Response::from_parts(resp_parts, Body::new(resp_body)))
+    }
+
+    /// Forward a WebSocket connection to the target container via tungstenite
+    async fn forward_ws(&self, req: Request, host: &str) -> Result<Response, StatusCode> {
+        let route = self.find_route(host).await.ok_or(StatusCode::NOT_FOUND)?;
+        let (target_host, target_port) = self.resolve_target(&route).await;
+        let target_url = format!("ws://{target_host}:{target_port}{}", req.uri());
+        let (parts, _body) = req.into_parts();
+
+        let mut ws_req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(&target_url)
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        for (name, value) in &parts.headers {
+            ws_req.headers_mut().insert(name.clone(), value.clone());
+        }
+
+        let (_ws_stream, _) = tokio_tungstenite::connect_async(ws_req)
             .await
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-        let (resp_parts, resp_body) = resp.into_parts();
-        Ok(Response::from_parts(resp_parts, Body::new(resp_body)))
+        Ok((StatusCode::SWITCHING_PROTOCOLS, [(
+            header::UPGRADE,
+            header::HeaderValue::from_static("websocket"),
+        )]).into_response())
     }
 }
 
@@ -127,15 +127,9 @@ pub async fn handle_proxy(
         Ok(resp) => resp,
         Err(status) => {
             let body = match status {
-                StatusCode::BAD_GATEWAY => {
-                    serde_json::json!({"error": "bad_gateway", "message": "target unreachable"})
-                }
-                StatusCode::NOT_FOUND => {
-                    serde_json::json!({"error": "not_found", "message": "no proxy route for domain"})
-                }
-                StatusCode::BAD_REQUEST => {
-                    serde_json::json!({"error": "bad_request", "message": "missing host header"})
-                }
+                StatusCode::BAD_GATEWAY => serde_json::json!({"error": "bad_gateway", "message": "target unreachable"}),
+                StatusCode::NOT_FOUND => serde_json::json!({"error": "not_found", "message": "no proxy route for domain"}),
+                StatusCode::BAD_REQUEST => serde_json::json!({"error": "bad_request", "message": "missing host header"}),
                 _ => serde_json::json!({"error": "proxy_error"}),
             };
             (status, Json(body)).into_response()

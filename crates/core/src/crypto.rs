@@ -1,5 +1,5 @@
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, KeyInit};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 const NONCE_SIZE: usize = 12;

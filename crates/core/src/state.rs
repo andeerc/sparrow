@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use sparrow_proto::*;

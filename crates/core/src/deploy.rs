@@ -90,15 +90,15 @@ pub struct DeployVolume {
 #[derive(Debug, Deserialize)]
 pub struct DeployAutoscale {
     #[serde(default = "default_autoscale_min")]
-    pub min: u32,
+    pub min_replicas: u32,
     #[serde(default = "default_autoscale_max")]
-    pub max: u32,
+    pub max_replicas: u32,
     #[serde(default)]
-    pub cpu_target: Option<f64>,
+    pub cpu_target_percent: Option<f64>,
     #[serde(default)]
-    pub mem_target: Option<f64>,
+    pub memory_target_percent: Option<f64>,
     #[serde(default = "default_cooldown")]
-    pub cooldown: u64,
+    pub cooldown_seconds: u64,
 }
 
 fn default_replicas() -> u32 { 1 }
@@ -133,7 +133,8 @@ impl DeployManifest {
 
     /// Convert to ServiceSpec for state store
     pub fn to_service_spec(&self) -> ServiceSpec {
-        let mut spec = ServiceSpec::new(&self.metadata.name, &self.spec.image);
+        let image = ensure_registry(&self.spec.image);
+        let mut spec = ServiceSpec::new(&self.metadata.name, &image);
         spec.desired_replicas = self.spec.replicas;
 
         spec.ports = self.spec.ports.iter().map(|p| PortMapping {
@@ -162,14 +163,42 @@ impl DeployManifest {
         };
 
         spec.autoscaling = self.spec.autoscale.as_ref().map(|a| AutoscalingConfig {
-            min_replicas: a.min,
-            max_replicas: a.max,
-            cpu_target_percent: a.cpu_target,
-            memory_target_percent: a.mem_target,
-            cooldown_seconds: a.cooldown,
+            min_replicas: a.min_replicas,
+            max_replicas: a.max_replicas,
+            cpu_target_percent: a.cpu_target_percent,
+            memory_target_percent: a.memory_target_percent,
+            cooldown_seconds: a.cooldown_seconds,
         });
 
         spec
+    }
+}
+
+/// If image name has no registry prefix (no dot or colon before first slash),
+/// prepend docker.io/library/.
+fn ensure_registry(image: &str) -> String {
+    let has_registry = image.contains('/') && (
+        image.starts_with("docker.io/") ||
+        image.starts_with("ghcr.io/") ||
+        image.starts_with("quay.io/") ||
+        image.starts_with("registry.") ||
+        image.starts_with("localhost/")
+    );
+    // Also detect if first segment before / contains a dot (domain) or colon (port)
+    let has_domain = if let Some((prefix, _)) = image.split_once('/') {
+        prefix.contains('.') || prefix.contains(':')
+    } else {
+        false
+    };
+
+    if image.contains('/') && (has_registry || has_domain) {
+        image.to_string()
+    } else if image.contains('/') {
+        // Has a slash but no domain-like prefix: e.g. "myuser/myimage"
+        format!("docker.io/{image}")
+    } else {
+        // Plain name like "nginx:alpine"
+        format!("docker.io/library/{image}")
     }
 }
 
@@ -216,16 +245,20 @@ spec:
     - overlay-net
   restart: always
   autoscale:
-    min: 2
-    max: 10
-    cpu_target: 70
-    cooldown: 60
+    min_replicas: 2
+    max_replicas: 10
+    cpu_target_percent: 70
+    cooldown_seconds: 60
 "#;
         let manifest = DeployManifest::from_yaml(yaml).unwrap();
         assert_eq!(manifest.spec.replicas, 3);
         assert_eq!(manifest.spec.ports.len(), 2);
         assert_eq!(manifest.spec.env.len(), 1);
         assert!(manifest.spec.autoscale.is_some());
+        let as_config = manifest.spec.autoscale.unwrap();
+        assert_eq!(as_config.min_replicas, 2);
+        assert_eq!(as_config.max_replicas, 10);
+        assert_eq!(as_config.cpu_target_percent, Some(70.0));
     }
 
     #[test]
@@ -261,12 +294,30 @@ spec:
         let manifest = DeployManifest::from_yaml(yaml).unwrap();
         let spec = manifest.to_service_spec();
         assert_eq!(spec.name, "test-app");
-        assert_eq!(spec.image, "nginx:alpine");
+        assert_eq!(spec.image, "docker.io/library/nginx:alpine");
         assert_eq!(spec.desired_replicas, 3);
         assert_eq!(spec.ports.len(), 1);
         assert_eq!(spec.ports[0].published, 80);
         assert_eq!(spec.ports[0].target, 8080);
         assert_eq!(spec.env.len(), 1);
         assert_eq!(spec.env[0].key, "FOO");
+        assert_eq!(spec.env[0].value, "bar");
+    }
+
+    #[test]
+    fn test_ensure_registry_adds_docker_io() {
+        assert_eq!(ensure_registry("nginx:alpine"), "docker.io/library/nginx:alpine");
+        assert_eq!(ensure_registry("nginx"), "docker.io/library/nginx");
+    }
+
+    #[test]
+    fn test_ensure_registry_preserves_full_path() {
+        assert_eq!(ensure_registry("docker.io/nginx:latest"), "docker.io/nginx:latest");
+        assert_eq!(ensure_registry("ghcr.io/org/image:v1"), "ghcr.io/org/image:v1");
+    }
+
+    #[test]
+    fn test_ensure_registry_user_image() {
+        assert_eq!(ensure_registry("myuser/myimage:tag"), "docker.io/myuser/myimage:tag");
     }
 }

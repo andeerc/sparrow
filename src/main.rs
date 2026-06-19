@@ -482,6 +482,21 @@ async fn handle_service(
                 } else { None }
             }).collect();
 
+            if replicas > 1 && !ports.is_empty() {
+                let host_ports: Vec<String> = ports.iter().map(|p| p.published.to_string()).collect();
+                eprintln!(
+                    "❌ Cannot expose host ports [{ports}] with {replicas} replicas.\n\
+                       Each replica would try to bind the same port — only 1 would succeed.\n\n\
+                       Options:\n  \
+                       • Use --replicas 1 for direct port access\n  \
+                       • Use --domain <domain> to route through the proxy (no host port conflict)\n    \
+                       Example: sparrow service create --name {name} --image {image} --replicas {replicas} --domain myapp.local\n\n\
+                       The proxy (port 7444) routes by domain to container IPs on the internal Podman network.",
+                    ports = host_ports.join(", ")
+                );
+                return Ok(());
+            }
+
             // Parse env
             let env_vars: Vec<EnvVar> = env.iter().filter_map(|e| {
                 let mut parts = e.splitn(2, '=');

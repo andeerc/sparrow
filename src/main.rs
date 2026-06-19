@@ -503,7 +503,7 @@ async fn handle_service(
     cluster_state: &Option<sparrow_api::SharedAppState>,
 ) -> anyhow::Result<()> {
     match action {
-        ServiceAction::Create { name, image, replicas, port, env, volume: _, network: _, restart: _, domain, autoscale: _ } => {
+        ServiceAction::Create { name, image, replicas, port, env, volume, network: _, restart: _, domain, autoscale: _ } => {
             if !podman_ok {
                 error!("❌ Podman not available (verify Podman is installed)");
                 std::process::exit(1);
@@ -541,11 +541,23 @@ async fn handle_service(
                 }
             }).collect();
 
+            let volumes: Vec<VolumeMount> = volume.iter().filter_map(|v| {
+                let parts: Vec<&str> = v.split(':').collect();
+                if parts.len() >= 2 {
+                    Some(VolumeMount {
+                        source: parts[0].to_string(),
+                        target: parts[1].to_string(),
+                        read_only: parts.get(2).map(|s| *s == "ro").unwrap_or(false),
+                    })
+                } else { None }
+            }).collect();
+
             // Create service spec
             let mut spec = ServiceSpec::new(&name, &image);
             spec.desired_replicas = replicas;
             spec.ports = ports;
             spec.env = env_vars;
+            spec.volumes = volumes;
 
             // Persist to state store
             state.create_service(&spec)?;

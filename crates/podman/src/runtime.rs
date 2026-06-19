@@ -290,6 +290,20 @@ impl PodmanRuntime {
 
         Ok((cpu, mem))
     }
+
+    /// Get the internal IP address of a running container via podman inspect.
+    pub async fn inspect_ip(&self, name: &str) -> Option<String> {
+        let output = tokio::process::Command::new("podman")
+            .args(["inspect", "--format", "{{.NetworkSettings.IPAddress}}", name])
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if ip.is_empty() || ip == "<nil>" { None } else { Some(ip) }
+    }
 }
 
 fn parse_memory(s: &str) -> Option<u64> {

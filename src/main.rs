@@ -197,12 +197,12 @@ async fn main() -> anyhow::Result<()> {
                         let env_refs: Vec<(String, String)> = env_base.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
                         match runtime.run_container(&cname, &spec.image, &ports, &env_refs, &std::collections::HashMap::new()).await {
                             Ok(cid) => {
-                                state.record_container(&cname, &spec.id, &spec.image, i, "Running")?;
+                                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Running")?;
                                 println!("  ✅ {cname} -> {cid:.12}");
                                 success += 1;
                             }
                             Err(e) => {
-                                state.record_container(&cname, &spec.id, &spec.image, i, "Failed")?;
+                                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Failed")?;
                                 eprintln!("  ❌ {cname}: {e}");
                             }
                         }
@@ -562,12 +562,12 @@ async fn handle_service(
 
                 match runtime.run_container(&container_name, &image, &port_refs, &env_refs, &labels).await {
                     Ok(cid) => {
-                        state.record_container(&container_name, &spec.id, &image, i, "Running")?;
+                        state.record_container_with_ip(&container_name, &spec.id, &image, i, "Running")?;
                         println!("  ✅ {container_name} -> {cid:.12}");
                         success += 1;
                     }
                     Err(e) => {
-                        state.record_container(&container_name, &spec.id, &image, i, "Failed")?;
+                        state.record_container_with_ip(&container_name, &spec.id, &image, i, "Failed")?;
                         eprintln!("  ❌ {container_name}: {e}");
                     }
                 }
@@ -659,11 +659,11 @@ async fn handle_service(
 
                     match runtime.run_container(&container_name, &svc.image, &port_refs, &[], &labels).await {
                         Ok(cid) => {
-                            state.record_container(&container_name, &svc.id, &svc.image, i, "Running")?;
+                            state.record_container_with_ip(&container_name, &svc.id, &svc.image, i, "Running")?;
                             println!("  ✅ {container_name} -> {cid:.12}");
                         }
                         Err(e) => {
-                            state.record_container(&container_name, &svc.id, &svc.image, i, "Failed")?;
+                            state.record_container_with_ip(&container_name, &svc.id, &svc.image, i, "Failed")?;
                             eprintln!("  ❌ {container_name}: {e}");
                         }
                     }
@@ -791,7 +791,7 @@ async fn handle_service(
                 match runtime.run_container(&new_name, &new_image, &port_refs, &[], &labels).await {
                     Ok(cid) => {
                         println!("    ✅ {new_name} -> {cid:.12} (waiting for {delay})");
-                        state.record_container(&new_name, &svc.id, &new_image, (containers.len() + i + 1) as u32, "Running")?;
+                        state.record_container_with_ip(&new_name, &svc.id, &new_image, (containers.len() + i + 1) as u32, "Running")?;
 
                         // Remove old
                         match runtime.remove_container(&c.name).await {
@@ -1176,7 +1176,7 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
                     match runtime.run_container(&c.name, &svc.image, &port_refs, &[], &std::collections::HashMap::new()).await {
                         Ok(cid) => {
-                            if let Err(e) = state.record_container(&c.name, &svc.id, &svc.image, containers.len() as u32 + 1, "Running") {
+                            if let Err(e) = state.record_container_with_ip(&c.name, &svc.id, &svc.image, containers.len() as u32 + 1, "Running") {
                                 tracing::error!("Health: failed to record {}: {e}", c.name);
                             }
                             tracing::info!("Health: restarted {} -> {:.12}", c.name, cid);
@@ -1196,7 +1196,7 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
                     match runtime.run_container(&cname, &svc.image, &port_refs, &[], &std::collections::HashMap::new()).await {
                         Ok(cid) => {
-                            let _ = state.record_container(&cname, &svc.id, &svc.image, i as u32, "Running");
+                            let _ = state.record_container_with_ip(&cname, &svc.id, &svc.image, i as u32, "Running");
                             tracing::info!("Health: scaled up {} -> {:.12}", cname, cid);
                         }
                         Err(e) => tracing::error!("Health: scale up failed {}: {e}", cname),

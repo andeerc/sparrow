@@ -150,14 +150,9 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
 }
 
 /// Factory that creates network connections to peer Raft nodes.
+#[derive(Default)]
 pub struct NetworkFactory {
     pub tls: Option<TlsConfig>,
-}
-
-impl Default for NetworkFactory {
-    fn default() -> Self {
-        Self { tls: None }
-    }
 }
 
 impl RaftNetworkFactory<TypeConfig> for NetworkFactory {

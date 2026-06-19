@@ -79,7 +79,8 @@ impl StateStore {
                 replica_seq INTEGER NOT NULL,
                 state       TEXT NOT NULL DEFAULT 'Created',
                 created_at  TEXT NOT NULL,
-                node_id     TEXT NOT NULL DEFAULT ''
+                node_id     TEXT NOT NULL DEFAULT '',
+                ip_address  TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS deployments (
@@ -378,15 +379,27 @@ impl StateStore {
         image: &str,
         replica_seq: u32,
         state: &str,
+        ip_address: &str,
     ) -> anyhow::Result<()> {
         let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT OR REPLACE INTO containers (container_name, service_id, image, replica_seq, state, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![container_name, service_id, image, replica_seq, state, now],
+            "INSERT OR REPLACE INTO containers (container_name, service_id, image, replica_seq, state, created_at, ip_address)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![container_name, service_id, image, replica_seq, state, now, ip_address],
         )?;
         Ok(())
+    }
+
+    pub fn record_container_with_ip(
+        &self,
+        container_name: &str,
+        service_id: &str,
+        image: &str,
+        replica_seq: u32,
+        state: &str,
+    ) -> anyhow::Result<()> {
+        self.record_container(container_name, service_id, image, replica_seq, state, "")
     }
 
     pub fn update_container_state(&self, container_name: &str, state: &str) -> anyhow::Result<bool> {
@@ -401,7 +414,7 @@ impl StateStore {
     pub fn get_service_containers(&self, service_id: &str) -> anyhow::Result<Vec<ContainerStatus>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT container_name, service_id, image, replica_seq, state, created_at, node_id
+            "SELECT container_name, service_id, image, replica_seq, state, created_at, node_id, ip_address
              FROM containers WHERE service_id = ?1 ORDER BY replica_seq",
         )?;
 
@@ -409,6 +422,7 @@ impl StateStore {
             .query_map(params![service_id], |row| {
                 let state_str: String = row.get(4)?;
                 let created: String = row.get(5)?;
+                let ip: String = row.get(7)?;
                 let container_state = match state_str.as_str() {
                     "Running" => ContainerState::Running,
                     "Exited" => ContainerState::Exited,
@@ -427,7 +441,7 @@ impl StateStore {
                     cpu_percent: None,
                     mem_bytes: None,
                     started_at: created.parse().ok(),
-                    ip_address: None,
+                    ip_address: if ip.is_empty() { None } else { Some(ip) },
                 })
             })?
             .filter_map(|r| r.ok())
@@ -546,6 +560,7 @@ impl StateStore {
         Ok(rules)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_alert_event(
         &self,
         channel_id: &str,
@@ -744,7 +759,7 @@ mod tests {
         let spec = make_spec("container-test", "nginx", 1);
         store.create_service(&spec).unwrap();
 
-        store.record_container("web-1", &spec.id, "nginx", 1, "Running").unwrap();
+        store.record_container("web-1", &spec.id, "nginx", 1, "Running", "").unwrap();
         let containers = store.get_service_containers(&spec.id).unwrap();
         assert_eq!(containers.len(), 1);
         assert_eq!(containers[0].name, "web-1");
@@ -759,9 +774,9 @@ mod tests {
         let spec = make_spec("multi-container", "nginx", 3);
         store.create_service(&spec).unwrap();
 
-        store.record_container("svc-1", &spec.id, "nginx", 1, "Running").unwrap();
-        store.record_container("svc-2", &spec.id, "nginx", 2, "Running").unwrap();
-        store.record_container("svc-3", &spec.id, "nginx", 3, "Failed").unwrap();
+store.record_container("svc-1", &spec.id, "nginx", 1, "Running", "").unwrap();
+store.record_container("svc-2", &spec.id, "nginx", 2, "Running", "").unwrap();
+store.record_container("svc-3", &spec.id, "nginx", 3, "Failed", "").unwrap();
 
         let containers = store.get_service_containers(&spec.id).unwrap();
         assert_eq!(containers.len(), 3);
@@ -774,7 +789,7 @@ mod tests {
         let (store, dir) = setup_store();
         let spec = make_spec("state-test", "nginx", 1);
         store.create_service(&spec).unwrap();
-        store.record_container("c1", &spec.id, "nginx", 1, "Running").unwrap();
+        store.record_container("c1", &spec.id, "nginx", 1, "Running", "").unwrap();
         store.update_container_state("c1", "Stopped").unwrap();
 
         let containers = store.get_service_containers(&spec.id).unwrap();

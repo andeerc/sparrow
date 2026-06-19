@@ -207,6 +207,7 @@ impl AutoscaleEngine {
                                         &svc.image,
                                         new_replicas,
                                         "Running",
+                                        "",
                                     )
                                     .ok();
                                 self.store

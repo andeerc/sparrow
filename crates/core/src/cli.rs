@@ -314,6 +314,7 @@ pub enum AutoscaleAction {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum AlertAction {
     /// Set alert channel (telegram or smtp)
     Set {
@@ -356,6 +357,7 @@ pub enum AlertAction {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConfigAction {
     /// Initialize or overwrite config file
     Init {

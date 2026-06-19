@@ -28,8 +28,8 @@ type E = alias::EntryOf<C>;
 type LE = alias::LogIdOf<C>;
 type VO = alias::VoteOf<C>;
 type SO = alias::SnapshotOf<C>;
-type SMO = alias::SnapshotMetaOf<C>;
-type SDO = alias::SnapshotDataOf<C>;
+type Smo = alias::SnapshotMetaOf<C>;
+type Sdo = alias::SnapshotDataOf<C>;
 type StoredM = alias::StoredMembershipOf<C>;
 
 #[derive(Clone)]
@@ -96,7 +96,7 @@ impl RaftLogReader<C> for StoredRaftLog {
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT term, node_id, committed FROM raft_hard_state WHERE id = 1")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(|e| io::Error::other(e))?;
 
         let result: Result<(u64, u64, i32), _> =
             stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)));
@@ -110,7 +110,7 @@ impl RaftLogReader<C> for StoredRaftLog {
                 }
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            Err(e) => Err(io::Error::other(e)),
         }
     }
 }
@@ -123,7 +123,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
         let last_purged = self.last_purged.lock().unwrap();
 
         let last_log_id = entries.last().map(|e| e.log_id());
-        let last_purged_log_id = last_purged.clone();
+        let last_purged_log_id = *last_purged;
 
         Ok(LogState {
             last_purged_log_id,
@@ -148,7 +148,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
             "UPDATE raft_hard_state SET term = ?1, node_id = ?2, committed = ?3 WHERE id = 1",
             params![term, node_id, committed],
         )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(|e| io::Error::other(e))?;
         Ok(())
     }
 
@@ -207,7 +207,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
             "UPDATE raft_committed SET log_index = ?1 WHERE id = 1",
             params![idx],
         )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(|e| io::Error::other(e))?;
         Ok(())
     }
 
@@ -215,7 +215,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT log_index FROM raft_committed WHERE id = 1")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(|e| io::Error::other(e))?;
 
         let idx: Result<Option<u64>, _> = stmt.query_row([], |row| row.get(0));
         match idx {
@@ -230,7 +230,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
                 }
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            Err(e) => Err(io::Error::other(e)),
         }
     }
 }
@@ -240,8 +240,8 @@ pub struct StoredStateMachine {
     db: Arc<Mutex<Connection>>,
     last_applied: Arc<Mutex<Option<LE>>>,
     last_membership: Arc<Mutex<StoredM>>,
-    snapshot_meta: Arc<Mutex<Option<SMO>>>,
-    snapshot_data: Arc<Mutex<Option<SDO>>>,
+    snapshot_meta: Arc<Mutex<Option<Smo>>>,
+    snapshot_data: Arc<Mutex<Option<Sdo>>>,
 }
 
 impl StoredStateMachine {
@@ -284,7 +284,7 @@ pub struct SnapshotBuilder {
 
 impl RaftSnapshotBuilder<C> for SnapshotBuilder {
     async fn build_snapshot(&mut self) -> Result<SO, io::Error> {
-        let la = self.last_applied.lock().unwrap().clone();
+        let la = *self.last_applied.lock().unwrap();
         let membership = self.last_membership.lock().unwrap().clone();
 
         let mut members = Vec::new();
@@ -295,7 +295,7 @@ impl RaftSnapshotBuilder<C> for SnapshotBuilder {
         }
 
         let last_applied = la.unwrap_or_else(|| {
-            LE::new(VO::new(0, 0).leader_id().clone(), 0)
+            LE::new(*VO::new(0, 0).leader_id(), 0)
         });
 
         let state = SnapshotState {
@@ -307,7 +307,7 @@ impl RaftSnapshotBuilder<C> for SnapshotBuilder {
         };
 
         let data = bincode::serialize(&state)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(|e| io::Error::other(e))?;
 
         let snapshot_id = format!(
             "{}-{}-{}",
@@ -333,7 +333,7 @@ impl RaftStateMachine<C> for StoredStateMachine {
     type SnapshotBuilder = SnapshotBuilder;
 
     async fn applied_state(&mut self) -> Result<(Option<LE>, StoredM), io::Error> {
-        let la = self.last_applied.lock().unwrap().clone();
+        let la = *self.last_applied.lock().unwrap();
         let mem = self.last_membership.lock().unwrap().clone();
         Ok((la, mem))
     }
@@ -351,7 +351,7 @@ impl RaftStateMachine<C> for StoredStateMachine {
 
             if let Some(membership) = entry.get_membership() {
                 let mut mem = self.last_membership.lock().unwrap();
-                *mem = StoredMembership::new(Some(log_id.clone()), membership);
+                *mem = StoredMembership::new(Some(log_id), membership);
             }
 
             *self.last_applied.lock().unwrap() = Some(log_id);
@@ -367,17 +367,17 @@ impl RaftStateMachine<C> for StoredStateMachine {
         Ok(())
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<SDO, io::Error> {
+    async fn begin_receiving_snapshot(&mut self) -> Result<Sdo, io::Error> {
         Ok(Cursor::new(Vec::new()))
     }
 
-    async fn install_snapshot(&mut self, meta: &SMO, snapshot: SDO) -> Result<(), io::Error> {
+    async fn install_snapshot(&mut self, meta: &Smo, snapshot: Sdo) -> Result<(), io::Error> {
         let data: Vec<u8> = snapshot.into_inner();
         *self.snapshot_meta.lock().unwrap() = Some(meta.clone());
         *self.snapshot_data.lock().unwrap() = Some(Cursor::new(data));
 
         if let Some(ref last_log_id) = meta.last_log_id {
-            *self.last_applied.lock().unwrap() = Some(last_log_id.clone());
+            *self.last_applied.lock().unwrap() = Some(*last_log_id);
         }
         *self.last_membership.lock().unwrap() = meta.last_membership.clone();
         Ok(())

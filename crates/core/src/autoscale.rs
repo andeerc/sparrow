@@ -105,7 +105,7 @@ impl AutoscaleEngine {
         };
 
         let cpu_over = avg_cpu > cpu_target;
-        let mem_over = config.memory_target_percent.map_or(false, |t| max_mem_pct > t);
+        let mem_over = config.memory_target_percent.is_some_and(|t| max_mem_pct > t);
 
         if (cpu_over || mem_over) && current_replicas < config.max_replicas {
             ScaleDecision::ScaleUp

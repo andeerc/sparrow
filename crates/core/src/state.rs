@@ -182,6 +182,18 @@ impl StateStore {
             INSERT OR IGNORE INTO schema_version (version) VALUES (4);
             ",
         )?;
+
+        // Migration v5: add ip_address column to containers table (if not exists)
+        let has_ip = conn
+            .prepare("SELECT ip_address FROM containers LIMIT 1")
+            .is_ok();
+        if !has_ip {
+            conn.execute_batch(
+                "ALTER TABLE containers ADD COLUMN ip_address TEXT NOT NULL DEFAULT '';
+                 INSERT OR IGNORE INTO schema_version (version) VALUES (5);",
+            )?;
+        }
+
         Ok(())
     }
 

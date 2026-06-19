@@ -3,8 +3,12 @@ pub mod dashboard;
 
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::time::Instant;
 
-use axum::{Router, routing::{get, post, delete}, Json, extract::State, body::Bytes};
+use axum::{
+    Router, routing::{get, post, delete}, Json, extract::State, body::Bytes,
+    middleware::{self, Next}, response::{Response, IntoResponse}, http::StatusCode,
+};
 use serde::{Serialize, Deserialize};
 use tokio::sync::RwLock;
 use sparrow_core::state::StateStore;
@@ -88,6 +92,8 @@ pub struct AppState {
     pub alerts: RwLock<AlertState>,
     pub raft_cluster: RwLock<Option<std::sync::Arc<sparrow_raft::RaftCluster>>>,
     pub state_store: Option<Arc<StateStore>>,
+    /// Rate limiter: IP -> (window_start, request_count)
+    pub rate_limiter: RwLock<HashMap<String, (Instant, u64)>>,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -109,6 +115,37 @@ pub async fn start_proxy(state: SharedAppState, port: u16) -> anyhow::Result<()>
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn rate_limit_check(
+    State(state): State<SharedAppState>,
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let client_ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .split(',')
+        .next()
+        .unwrap_or("unknown")
+        .trim()
+        .to_string();
+
+    let mut limiter = state.rate_limiter.write().await;
+    let now = Instant::now();
+    let entry = limiter.entry(client_ip).or_insert_with(|| (now, 0));
+    if now.duration_since(entry.0).as_secs() >= 60 {
+        *entry = (now, 0);
+    }
+    entry.1 += 1;
+    if entry.1 > 100 {
+        drop(limiter);
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error": "rate_limit", "message": "Too many requests"}))).into_response();
+    }
+    drop(limiter);
+    next.run(request).await
 }
 
 pub async fn start_api(
@@ -142,6 +179,7 @@ pub async fn start_api(
         .route("/raft/add_learner", post(raft_add_learner))
         .merge(dashboard::routes())
         .fallback(proxy::handle_proxy)
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_check))
         .with_state(state);
 
     let addr: std::net::SocketAddr = listen.parse()
@@ -434,6 +472,7 @@ pub fn init_cluster(
         alerts: RwLock::new(AlertState { channels: vec![], events: vec![] }),
         raft_cluster: RwLock::new(raft_cluster),
         state_store: None,
+        rate_limiter: RwLock::new(HashMap::new()),
     })
 }
 

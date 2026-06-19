@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use sparrow_proto::*;
@@ -6,6 +7,7 @@ use std::sync::Mutex;
 
 pub struct StateStore {
     conn: Mutex<Connection>,
+    db_path: String,
 }
 
 impl StateStore {
@@ -16,18 +18,41 @@ impl StateStore {
         }
 
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=1000;")?;
 
         let store = Self {
             conn: Mutex::new(conn),
+            db_path: path.to_string_lossy().to_string(),
         };
         store.migrate()?;
+        store.wal_checkpoint();
         Ok(store)
     }
 
-    fn conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))
+    fn wal_checkpoint(&self) {
+        if let Ok(conn) = self.conn() {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
     }
+
+fn conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
+    self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))
+}
+
+pub fn backup(&self, dest: &str) -> anyhow::Result<()> {
+    // Flush WAL then copy the database file
+    let conn = self.conn()?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(conn);
+    std::fs::copy(&self.db_path, dest)?;
+    Ok(())
+}
+
+pub fn vacuum(&self) -> anyhow::Result<()> {
+    let conn = self.conn()?;
+    conn.execute_batch("VACUUM;")?;
+    Ok(())
+}
 
     fn migrate(&self) -> anyhow::Result<()> {
         let conn = self.conn()?;

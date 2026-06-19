@@ -239,6 +239,26 @@ async fn main() -> anyhow::Result<()> {
         // Config handled in early return above
         Command::Config { .. } => unreachable!(),
 
+        // ── Database Commands ──
+        Command::Db { operation, path } => {
+            match operation.as_str() {
+                "backup" => {
+                    let dest = path.unwrap_or_else(|| format!("{}.backup.db", config.cluster.data_dir));
+                    match state.backup(&dest) {
+                        Ok(_) => println!("✅ Database backed up to {dest}"),
+                        Err(e) => eprintln!("❌ Backup failed: {e}"),
+                    }
+                }
+                "vacuum" => {
+                    match state.vacuum() {
+                        Ok(_) => println!("✅ Database vacuumed"),
+                        Err(e) => eprintln!("❌ Vacuum failed: {e}"),
+                    }
+                }
+                _ => eprintln!("❌ Unknown operation: {operation}. Use: backup, vacuum"),
+            }
+        }
+
         // ── Update Commands (Fase 4) ──
         Command::Update { action } => handle_update(action).await?,
 

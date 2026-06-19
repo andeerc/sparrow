@@ -73,6 +73,14 @@ pub enum Command {
         action: ConfigAction,
     },
 
+    /// Database management (backup, vacuum)
+    Db {
+        /// Database operation: backup, vacuum
+        operation: String,
+        /// Output path for backup file
+        path: Option<String>,
+    },
+
     /// Check for updates and upgrade Sparrow
     Update {
         #[command(subcommand)]

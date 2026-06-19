@@ -96,6 +96,7 @@ impl AutoscaleEngine {
         _name: &str,
         current_replicas: u32,
         avg_cpu: f64,
+        max_mem_pct: f64,
         config: &AutoscalingConfig,
     ) -> ScaleDecision {
         let cpu_target = match config.cpu_target_percent {
@@ -103,7 +104,10 @@ impl AutoscaleEngine {
             None => return ScaleDecision::Noop,
         };
 
-        if avg_cpu > cpu_target && current_replicas < config.max_replicas {
+        let cpu_over = avg_cpu > cpu_target;
+        let mem_over = config.memory_target_percent.map_or(false, |t| max_mem_pct > t);
+
+        if (cpu_over || mem_over) && current_replicas < config.max_replicas {
             ScaleDecision::ScaleUp
         } else if avg_cpu < cpu_target * 0.7 && current_replicas > config.min_replicas {
             ScaleDecision::ScaleDown
@@ -161,11 +165,15 @@ impl AutoscaleEngine {
                     "service metrics"
                 );
 
+                let max_mem_pct = if metrics.max_mem > 0 {
+                    (metrics.max_mem as f64) / (2.0 * 1024.0 * 1024.0 * 1024.0) * 100.0
+                } else { 0.0 };
                 let decision = self
                     .decide_scale(
                         &svc.name,
                         svc.desired_replicas,
                         metrics.avg_cpu,
+                        max_mem_pct,
                         &config,
                     )
                     .await;

@@ -186,7 +186,10 @@ async fn main() -> anyhow::Result<()> {
                 format!("127.0.0.1:{port}")
             } else {
                 match tokio::net::lookup_host((host.as_str(), port)).await {
-                    Ok(mut addrs) => addrs.next().map(|a| a.to_string()).unwrap_or_else(|| format!("127.0.0.1:{port}")),
+                    Ok(mut addrs) => addrs
+                        .next()
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|| format!("127.0.0.1:{port}")),
                     Err(_) => format!("127.0.0.1:{port}"),
                 }
             };

@@ -447,54 +447,100 @@ mod tests {
 
     #[test]
     fn test_parse_cluster_init() {
-        let cmd = parse(&["sparrow", "cluster", "init", "--name", "prod", "--listen", "0.0.0.0:7443"]);
+        let cmd = parse(&[
+            "sparrow",
+            "cluster",
+            "init",
+            "--name",
+            "prod",
+            "--listen",
+            "0.0.0.0:7443",
+        ]);
         assert!(matches!(&cmd, Command::Cluster { .. }));
         if let Command::Cluster { action } = &cmd {
-            assert!(matches!(action, ClusterAction::Init { name, listen } if name == "prod" && listen == "0.0.0.0:7443"));
+            assert!(
+                matches!(action, ClusterAction::Init { name, listen } if name == "prod" && listen == "0.0.0.0:7443")
+            );
         }
     }
 
     #[test]
     fn test_parse_cluster_status() {
         let cmd = parse(&["sparrow", "cluster", "status"]);
-        assert!(matches!(&cmd, Command::Cluster { action: ClusterAction::Status }));
+        assert!(matches!(
+            &cmd,
+            Command::Cluster {
+                action: ClusterAction::Status
+            }
+        ));
     }
 
     #[test]
     fn test_parse_cluster_members() {
         let cmd = parse(&["sparrow", "cluster", "members"]);
-        assert!(matches!(&cmd, Command::Cluster { action: ClusterAction::Members }));
+        assert!(matches!(
+            &cmd,
+            Command::Cluster {
+                action: ClusterAction::Members
+            }
+        ));
     }
 
     #[test]
     fn test_parse_service_create() {
-        let cmd = parse(&["sparrow", "service", "create", "--name", "web", "--image", "nginx", "--replicas", "3", "--port", "80:80"]);
+        let cmd = parse(&[
+            "sparrow",
+            "service",
+            "create",
+            "--name",
+            "web",
+            "--image",
+            "nginx",
+            "--replicas",
+            "3",
+            "--port",
+            "80:80",
+        ]);
         if let Command::Service { action } = &cmd {
-            assert!(matches!(action, ServiceAction::Create { name, image, replicas, .. } if name == "web" && image == "nginx" && *replicas == 3));
+            assert!(
+                matches!(action, ServiceAction::Create { name, image, replicas, .. } if name == "web" && image == "nginx" && *replicas == 3)
+            );
         }
     }
 
     #[test]
     fn test_parse_service_create_with_env() {
-        let cmd = parse(&["sparrow", "service", "create", "--name", "app", "--image", "node", "--env", "FOO=bar", "--env", "BAZ=qux"]);
+        let cmd = parse(&[
+            "sparrow", "service", "create", "--name", "app", "--image", "node", "--env", "FOO=bar",
+            "--env", "BAZ=qux",
+        ]);
         if let Command::Service { action } = &cmd {
             if let ServiceAction::Create { env, .. } = action {
                 assert_eq!(env.len(), 2);
-            } else { panic!(); }
+            } else {
+                panic!();
+            }
         }
     }
 
     #[test]
     fn test_parse_service_list() {
         let cmd = parse(&["sparrow", "service", "list"]);
-        assert!(matches!(&cmd, Command::Service { action: ServiceAction::List }));
+        assert!(matches!(
+            &cmd,
+            Command::Service {
+                action: ServiceAction::List
+            }
+        ));
     }
 
     #[test]
     fn test_parse_service_scale() {
         let cmd = parse(&["sparrow", "service", "scale", "myapp", "5"]);
         if let Command::Service { action } = &cmd {
-            assert!(matches!(action, ServiceAction::Scale { name, replicas } if name == "myapp" && *replicas == 5));
+            assert!(
+                matches!(action, ServiceAction::Scale { name, replicas } if name == "myapp" && *replicas == 5)
+            );
         }
     }
 
@@ -502,7 +548,9 @@ mod tests {
     fn test_parse_service_logs() {
         let cmd = parse(&["sparrow", "service", "logs", "myapp", "--tail", "50"]);
         if let Command::Service { action } = &cmd {
-            assert!(matches!(action, ServiceAction::Logs { name, tail, follow } if name == "myapp" && *tail == 50 && !follow));
+            assert!(
+                matches!(action, ServiceAction::Logs { name, tail, follow } if name == "myapp" && *tail == 50 && !follow)
+            );
         }
     }
 
@@ -510,7 +558,9 @@ mod tests {
     fn test_parse_service_logs_follow() {
         let cmd = parse(&["sparrow", "service", "logs", "myapp", "--follow"]);
         if let Command::Service { action } = &cmd {
-            assert!(matches!(action, ServiceAction::Logs { name, follow, .. } if name == "myapp" && *follow));
+            assert!(
+                matches!(action, ServiceAction::Logs { name, follow, .. } if name == "myapp" && *follow)
+            );
         }
     }
 
@@ -524,7 +574,15 @@ mod tests {
 
     #[test]
     fn test_parse_config_init() {
-        let cmd = parse(&["sparrow", "config", "init", "--cluster-name", "test", "--log-level", "debug"]);
+        let cmd = parse(&[
+            "sparrow",
+            "config",
+            "init",
+            "--cluster-name",
+            "test",
+            "--log-level",
+            "debug",
+        ]);
         if let Command::Config { action } = &cmd {
             assert!(matches!(action, ConfigAction::Init { .. }));
         }
@@ -545,7 +603,9 @@ mod tests {
             if let ConfigAction::Show { path, yaml } = action {
                 assert_eq!(path.as_deref(), Some("./cfg.yaml"));
                 assert!(!yaml);
-            } else { panic!(); }
+            } else {
+                panic!();
+            }
         }
     }
 
@@ -567,7 +627,9 @@ mod tests {
         if let Command::Mcp { port, host } = &cmd {
             assert_eq!(*port, 3000);
             assert_eq!(host, "127.0.0.1");
-        } else { panic!(); }
+        } else {
+            panic!();
+        }
     }
 
     #[test]
@@ -576,12 +638,21 @@ mod tests {
         if let Command::Mcp { port, host } = &cmd {
             assert_eq!(*port, 8080);
             assert_eq!(host, "0.0.0.0");
-        } else { panic!(); }
+        } else {
+            panic!();
+        }
     }
 
     #[test]
     fn test_parse_network_create() {
-        let cmd = parse(&["sparrow", "network", "create", "mynet", "--subnet", "10.88.0.0/16"]);
+        let cmd = parse(&[
+            "sparrow",
+            "network",
+            "create",
+            "mynet",
+            "--subnet",
+            "10.88.0.0/16",
+        ]);
         if let Command::Network { action } = &cmd {
             assert!(matches!(action, NetworkAction::Create { name, .. } if name == "mynet"));
         }
@@ -590,18 +661,39 @@ mod tests {
     #[test]
     fn test_parse_network_list() {
         let cmd = parse(&["sparrow", "network", "list"]);
-        assert!(matches!(&cmd, Command::Network { action: NetworkAction::List }));
+        assert!(matches!(
+            &cmd,
+            Command::Network {
+                action: NetworkAction::List
+            }
+        ));
     }
 
     #[test]
     fn test_parse_network_rm() {
         let cmd = parse(&["sparrow", "network", "rm", "mynet"]);
-        assert!(matches!(&cmd, Command::Network { action: NetworkAction::Rm { .. } }));
+        assert!(matches!(
+            &cmd,
+            Command::Network {
+                action: NetworkAction::Rm { .. }
+            }
+        ));
     }
 
     #[test]
     fn test_parse_autoscale_set() {
-        let cmd = parse(&["sparrow", "autoscale", "set", "mysvc", "--min", "2", "--max", "10", "--cpu-target", "70"]);
+        let cmd = parse(&[
+            "sparrow",
+            "autoscale",
+            "set",
+            "mysvc",
+            "--min",
+            "2",
+            "--max",
+            "10",
+            "--cpu-target",
+            "70",
+        ]);
         if let Command::Autoscale { action } = &cmd {
             assert!(matches!(action, AutoscaleAction::Set { service, .. } if service == "mysvc"));
         }
@@ -618,13 +710,23 @@ mod tests {
     #[test]
     fn test_parse_autoscale_pause() {
         let cmd = parse(&["sparrow", "autoscale", "pause", "mysvc"]);
-        assert!(matches!(&cmd, Command::Autoscale { action: AutoscaleAction::Pause { .. } }));
+        assert!(matches!(
+            &cmd,
+            Command::Autoscale {
+                action: AutoscaleAction::Pause { .. }
+            }
+        ));
     }
 
     #[test]
     fn test_parse_node_list() {
         let cmd = parse(&["sparrow", "node", "list"]);
-        assert!(matches!(&cmd, Command::Node { action: NodeAction::List }));
+        assert!(matches!(
+            &cmd,
+            Command::Node {
+                action: NodeAction::List
+            }
+        ));
     }
 
     #[test]
@@ -638,21 +740,43 @@ mod tests {
     #[test]
     fn test_parse_node_drain() {
         let cmd = parse(&["sparrow", "node", "drain", "node1"]);
-        assert!(matches!(&cmd, Command::Node { action: NodeAction::Drain { .. } }));
+        assert!(matches!(
+            &cmd,
+            Command::Node {
+                action: NodeAction::Drain { .. }
+            }
+        ));
     }
 
     #[test]
     fn test_parse_alert_set_telegram() {
-        let cmd = parse(&["sparrow", "alert", "set", "mychan", "telegram", "--bot-token", "tok123", "--chat-id", "chat456"]);
+        let cmd = parse(&[
+            "sparrow",
+            "alert",
+            "set",
+            "mychan",
+            "telegram",
+            "--bot-token",
+            "tok123",
+            "--chat-id",
+            "chat456",
+        ]);
         if let Command::Alert { action } = &cmd {
-            assert!(matches!(action, AlertAction::Set { id, channel_type, .. } if id == "mychan" && channel_type == "telegram"));
+            assert!(
+                matches!(action, AlertAction::Set { id, channel_type, .. } if id == "mychan" && channel_type == "telegram")
+            );
         }
     }
 
     #[test]
     fn test_parse_alert_list() {
         let cmd = parse(&["sparrow", "alert", "list"]);
-        assert!(matches!(&cmd, Command::Alert { action: AlertAction::List }));
+        assert!(matches!(
+            &cmd,
+            Command::Alert {
+                action: AlertAction::List
+            }
+        ));
     }
 
     #[test]
@@ -665,12 +789,22 @@ mod tests {
     #[test]
     fn test_parse_update_check() {
         let cmd = parse(&["sparrow", "update", "check"]);
-        assert!(matches!(&cmd, Command::Update { action: UpdateAction::Check }));
+        assert!(matches!(
+            &cmd,
+            Command::Update {
+                action: UpdateAction::Check
+            }
+        ));
     }
 
     #[test]
     fn test_parse_update_install() {
         let cmd = parse(&["sparrow", "update", "install"]);
-        assert!(matches!(&cmd, Command::Update { action: UpdateAction::Install }));
+        assert!(matches!(
+            &cmd,
+            Command::Update {
+                action: UpdateAction::Install
+            }
+        ));
     }
 }

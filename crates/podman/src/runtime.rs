@@ -53,13 +53,21 @@ impl PodmanRuntime {
             .arg("--name")
             .arg(name)
             .arg("--label")
-            .arg(format!("sparrow.service={}", name.split('-').next().unwrap_or(name)));
+            .arg(format!(
+                "sparrow.service={}",
+                name.split('-').next().unwrap_or(name)
+            ));
 
         for port in ports {
-            cmd.arg("-p").arg(format!("{}:{}/{}", port.published, port.target, match port.protocol {
-                Protocol::Tcp => "tcp",
-                Protocol::Udp => "udp",
-            }));
+            cmd.arg("-p").arg(format!(
+                "{}:{}/{}",
+                port.published,
+                port.target,
+                match port.protocol {
+                    Protocol::Tcp => "tcp",
+                    Protocol::Udp => "udp",
+                }
+            ));
         }
 
         for (k, v) in env {
@@ -180,9 +188,7 @@ impl PodmanRuntime {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let inspect: serde_json::Value = serde_json::from_str(&stdout)?;
 
-        let state = inspect[0]["State"]["Status"]
-            .as_str()
-            .unwrap_or("unknown");
+        let state = inspect[0]["State"]["Status"].as_str().unwrap_or("unknown");
 
         let container_state = match state {
             "running" => ContainerState::Running,
@@ -197,7 +203,10 @@ impl PodmanRuntime {
             service_id: String::new(),
             node_id: String::new(),
             name: name.to_string(),
-            image: inspect[0]["Config"]["Image"].as_str().unwrap_or("").to_string(),
+            image: inspect[0]["Config"]["Image"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             state: container_state,
             exit_code: inspect[0]["State"]["ExitCode"].as_i64().map(|c| c as i32),
             cpu_percent: None,
@@ -210,12 +219,18 @@ impl PodmanRuntime {
     }
 
     /// List containers for a service
-    pub async fn list_containers(&self, service_name: &str) -> anyhow::Result<Vec<ContainerStatus>> {
+    pub async fn list_containers(
+        &self,
+        service_name: &str,
+    ) -> anyhow::Result<Vec<ContainerStatus>> {
         let output = tokio::process::Command::new("podman")
             .args([
-                "ps", "-a",
-                "--filter", &format!("label=sparrow.service={}", service_name),
-                "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
+                "ps",
+                "-a",
+                "--filter",
+                &format!("label=sparrow.service={}", service_name),
+                "--format",
+                "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
             ])
             .output()
             .await?;
@@ -294,7 +309,12 @@ impl PodmanRuntime {
     /// Get the internal IP address of a running container via podman inspect.
     pub async fn inspect_ip(&self, name: &str) -> Option<String> {
         let output = tokio::process::Command::new("podman")
-            .args(["inspect", "--format", "{{.NetworkSettings.IPAddress}}", name])
+            .args([
+                "inspect",
+                "--format",
+                "{{.NetworkSettings.IPAddress}}",
+                name,
+            ])
             .output()
             .await
             .ok()?;
@@ -302,7 +322,11 @@ impl PodmanRuntime {
             return None;
         }
         let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if ip.is_empty() || ip == "<nil>" { None } else { Some(ip) }
+        if ip.is_empty() || ip == "<nil>" {
+            None
+        } else {
+            Some(ip)
+        }
     }
 }
 
@@ -324,9 +348,10 @@ fn parse_memory(s: &str) -> Option<u64> {
 
 fn parse_number_unit(s: &str) -> Option<(f64, String)> {
     let s = s.trim();
-    let num_end = s.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(s.len());
+    let num_end = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
     let num: f64 = s[..num_end].parse().ok()?;
     let unit = s[num_end..].trim().to_string();
     Some((num, unit))
 }
-

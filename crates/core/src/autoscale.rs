@@ -105,7 +105,9 @@ impl AutoscaleEngine {
         };
 
         let cpu_over = avg_cpu > cpu_target;
-        let mem_over = config.memory_target_percent.is_some_and(|t| max_mem_pct > t);
+        let mem_over = config
+            .memory_target_percent
+            .is_some_and(|t| max_mem_pct > t);
 
         if (cpu_over || mem_over) && current_replicas < config.max_replicas {
             ScaleDecision::ScaleUp
@@ -167,7 +169,9 @@ impl AutoscaleEngine {
 
                 let max_mem_pct = if metrics.max_mem > 0 {
                     (metrics.max_mem as f64) / (2.0 * 1024.0 * 1024.0 * 1024.0) * 100.0
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 let decision = self
                     .decide_scale(
                         &svc.name,
@@ -197,13 +201,7 @@ impl AutoscaleEngine {
 
                         match self
                             .runtime
-                            .run_container(
-                                &container_name,
-                                &svc.image,
-                                &ports,
-                                &env,
-                                &svc.labels,
-                            )
+                            .run_container(&container_name, &svc.image, &ports, &env, &svc.labels)
                             .await
                         {
                             Ok(_id) => {
@@ -224,7 +222,11 @@ impl AutoscaleEngine {
                                         "scale_up",
                                         svc.desired_replicas,
                                         new_replicas,
-                                        &format!("cpu {:.1}% > target {:.0}%", metrics.avg_cpu, config.cpu_target_percent.unwrap_or(0.0)),
+                                        &format!(
+                                            "cpu {:.1}% > target {:.0}%",
+                                            metrics.avg_cpu,
+                                            config.cpu_target_percent.unwrap_or(0.0)
+                                        ),
                                     )
                                     .ok();
                                 self.last_action
@@ -248,9 +250,7 @@ impl AutoscaleEngine {
                         match self.runtime.remove_container(&container_name).await {
                             Ok(()) => {
                                 let new_replicas = svc.desired_replicas.saturating_sub(1);
-                                self.store
-                                    .update_replicas(&svc.id, new_replicas)
-                                    .ok();
+                                self.store.update_replicas(&svc.id, new_replicas).ok();
                                 self.store
                                     .update_container_state(&container_name, "Exited")
                                     .ok();
@@ -260,7 +260,11 @@ impl AutoscaleEngine {
                                         "scale_down",
                                         svc.desired_replicas,
                                         new_replicas,
-                                        &format!("cpu {:.1}% < threshold {:.0}%", metrics.avg_cpu, config.cpu_target_percent.unwrap_or(0.0) * 0.7),
+                                        &format!(
+                                            "cpu {:.1}% < threshold {:.0}%",
+                                            metrics.avg_cpu,
+                                            config.cpu_target_percent.unwrap_or(0.0) * 0.7
+                                        ),
                                     )
                                     .ok();
                                 self.last_action

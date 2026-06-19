@@ -1,12 +1,12 @@
-use aes_gcm::{Aes256Gcm, Key, Nonce};
 use aes_gcm::aead::{Aead, KeyInit};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 const NONCE_SIZE: usize = 12;
 
 /// Derive a 256-bit key from a seed string using SHA-256
 fn derive_key(seed: &str) -> Key<Aes256Gcm> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(seed.as_bytes());
     *Key::<Aes256Gcm>::from_slice(&hasher.finalize())
@@ -18,7 +18,9 @@ pub fn encrypt(plaintext: &str, seed: &str) -> String {
     let cipher = Aes256Gcm::new(&key);
     let nonce_vec: Vec<u8> = (0..NONCE_SIZE).map(|_| rand::random::<u8>()).collect();
     let nonce = Nonce::from_slice(&nonce_vec);
-    let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes()).unwrap_or_default();
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .unwrap_or_default();
     let mut combined = nonce_vec.clone();
     combined.extend_from_slice(&ciphertext);
     BASE64.encode(&combined)
@@ -29,10 +31,15 @@ pub fn decrypt(encoded: &str, seed: &str) -> Option<String> {
     let key = derive_key(seed);
     let cipher = Aes256Gcm::new(&key);
     let combined = BASE64.decode(encoded.as_bytes()).ok()?;
-    if combined.len() < NONCE_SIZE { return None; }
+    if combined.len() < NONCE_SIZE {
+        return None;
+    }
     let (nonce_bytes, ciphertext) = combined.split_at(NONCE_SIZE);
     let nonce = Nonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ciphertext).ok().map(|v| String::from_utf8_lossy(&v).to_string())
+    cipher
+        .decrypt(nonce, ciphertext)
+        .ok()
+        .map(|v| String::from_utf8_lossy(&v).to_string())
 }
 
 #[cfg(test)]

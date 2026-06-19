@@ -3,12 +3,12 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{StatusCode, Uri, header},
-    response::{IntoResponse, Response, Json},
+    http::{header, StatusCode, Uri},
+    response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::{Client, connect::HttpConnector};
+use hyper_util::client::legacy::{connect::HttpConnector, Client};
 
 use crate::{AppState, ProxyRoute};
 
@@ -46,12 +46,15 @@ impl ProxyService {
     }
 
     pub async fn forward(&self, req: Request) -> Result<Response, StatusCode> {
-        let is_ws = req.headers().get(header::UPGRADE)
+        let is_ws = req
+            .headers()
+            .get(header::UPGRADE)
             .and_then(|v| v.to_str().ok())
             .map(|v| v.to_lowercase().contains("websocket"))
             .unwrap_or(false);
 
-        let host = req.headers()
+        let host = req
+            .headers()
             .get(header::HOST)
             .and_then(|v| v.to_str().ok())
             .ok_or(StatusCode::BAD_REQUEST)?
@@ -89,7 +92,11 @@ impl ProxyService {
             .body(Full::new(body_bytes))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let resp = self.client.request(forward_req).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+        let resp = self
+            .client
+            .request(forward_req)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
         let (resp_parts, resp_body) = resp.into_parts();
         Ok(Response::from_parts(resp_parts, Body::new(resp_body)))
     }
@@ -101,7 +108,10 @@ impl ProxyService {
         let target_url = format!("ws://{target_host}:{target_port}{}", req.uri());
         let (parts, _body) = req.into_parts();
 
-        let mut ws_req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(&target_url)
+        let mut ws_req =
+            tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                &target_url,
+            )
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
         for (name, value) in &parts.headers {
             ws_req.headers_mut().insert(name.clone(), value.clone());
@@ -111,25 +121,32 @@ impl ProxyService {
             .await
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-        Ok((StatusCode::SWITCHING_PROTOCOLS, [(
-            header::UPGRADE,
-            header::HeaderValue::from_static("websocket"),
-        )]).into_response())
+        Ok((
+            StatusCode::SWITCHING_PROTOCOLS,
+            [(
+                header::UPGRADE,
+                header::HeaderValue::from_static("websocket"),
+            )],
+        )
+            .into_response())
     }
 }
 
-pub async fn handle_proxy(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-) -> Response {
+pub async fn handle_proxy(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let proxy = ProxyService::new(state);
     match proxy.forward(req).await {
         Ok(resp) => resp,
         Err(status) => {
             let body = match status {
-                StatusCode::BAD_GATEWAY => serde_json::json!({"error": "bad_gateway", "message": "target unreachable"}),
-                StatusCode::NOT_FOUND => serde_json::json!({"error": "not_found", "message": "no proxy route for domain"}),
-                StatusCode::BAD_REQUEST => serde_json::json!({"error": "bad_request", "message": "missing host header"}),
+                StatusCode::BAD_GATEWAY => {
+                    serde_json::json!({"error": "bad_gateway", "message": "target unreachable"})
+                }
+                StatusCode::NOT_FOUND => {
+                    serde_json::json!({"error": "not_found", "message": "no proxy route for domain"})
+                }
+                StatusCode::BAD_REQUEST => {
+                    serde_json::json!({"error": "bad_request", "message": "missing host header"})
+                }
                 _ => serde_json::json!({"error": "proxy_error"}),
             };
             (status, Json(body)).into_response()

@@ -1,17 +1,22 @@
-pub mod proxy;
 pub mod dashboard;
+pub mod proxy;
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    Router, routing::{get, post, delete}, Json, extract::State, body::Bytes,
-    middleware::{self, Next}, response::{Response, IntoResponse}, http::StatusCode,
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
+    Json, Router,
 };
-use serde::{Serialize, Deserialize};
-use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
 use sparrow_core::state::StateStore;
+use tokio::sync::RwLock;
 
 // ── Cluster Types ──
 
@@ -130,9 +135,13 @@ async fn rate_limit_check(
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
         if provided != *expected {
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-                "error": "unauthorized", "message": "invalid or missing Bearer token"
-            }))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "unauthorized", "message": "invalid or missing Bearer token"
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -157,7 +166,11 @@ async fn rate_limit_check(
     entry.1 += 1;
     if entry.1 > 100 {
         drop(limiter);
-        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error": "rate_limit", "message": "Too many requests"}))).into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "rate_limit", "message": "Too many requests"})),
+        )
+            .into_response();
     }
     drop(limiter);
     next.run(request).await
@@ -168,7 +181,9 @@ async fn metrics(State(state): State<SharedAppState>) -> String {
     let mut output = String::new();
     output.push_str("# HELP sparrow_services_total Total number of services\n");
     output.push_str("# TYPE sparrow_services_total gauge\n");
-    let services = state.state_store.as_ref()
+    let services = state
+        .state_store
+        .as_ref()
         .and_then(|s| s.list_services().ok())
         .map(|v| v.len())
         .unwrap_or(0);
@@ -219,17 +234,22 @@ pub async fn start_api(
         .route("/raft/add_learner", post(raft_add_learner))
         .merge(dashboard::routes())
         .fallback(proxy::handle_proxy)
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_check))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_check,
+        ))
         .with_state(state);
 
-    let addr: std::net::SocketAddr = listen.parse()
+    let addr: std::net::SocketAddr = listen
+        .parse()
         .map_err(|e| anyhow::anyhow!("Invalid address '{listen}': {e}"))?;
 
     match (tls_cert, tls_key) {
         (Some(cert_path), Some(key_path)) => {
-            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {e}"))?;
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {e}"))?;
             tracing::info!("API server listening TLS on {addr}");
             axum_server::bind_rustls(addr, tls_config)
                 .serve(app.into_make_service())
@@ -270,7 +290,9 @@ async fn heartbeat_handler(
 ) -> Json<serde_json::Value> {
     let mut cluster = state.cluster.write().await;
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let entry = cluster.nodes.entry(id.clone()).or_insert(ClusterNode {
         id: id.clone(),
@@ -290,10 +312,20 @@ async fn heartbeat_handler(
 async fn cluster_status(State(state): State<SharedAppState>) -> Json<serde_json::Value> {
     let cluster = state.cluster.read().await;
     let total = cluster.nodes.len();
-    let ready = cluster.nodes.values().filter(|n| n.status == "ready").count();
+    let ready = cluster
+        .nodes
+        .values()
+        .filter(|n| n.status == "ready")
+        .count();
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let unreachable = cluster.nodes.values().filter(|n| now - n.last_heartbeat > 30).count();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let unreachable = cluster
+        .nodes
+        .values()
+        .filter(|n| now - n.last_heartbeat > 30)
+        .count();
     let cluster_name = cluster.name.clone();
     drop(cluster);
 
@@ -325,15 +357,25 @@ async fn proxy_add(
     Json(route): Json<ProxyRoute>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     state.proxy_routes.write().await.push(route);
-    (axum::http::StatusCode::CREATED, Json(serde_json::json!({"status": "ok"})))
+    (
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    )
 }
 
 async fn proxy_remove(
     State(state): State<SharedAppState>,
     axum::extract::Path(domain): axum::extract::Path<String>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    state.proxy_routes.write().await.retain(|r| r.domain != domain);
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    state
+        .proxy_routes
+        .write()
+        .await
+        .retain(|r| r.domain != domain);
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"status": "ok"})),
+    )
 }
 
 // ── Autoscale Handlers ──
@@ -347,8 +389,15 @@ async fn autoscale_set(
     State(state): State<SharedAppState>,
     Json(policy): Json<AutoscalePolicy>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    state.autoscale_policies.write().await.insert(policy.service_id.clone(), policy);
-    (axum::http::StatusCode::CREATED, Json(serde_json::json!({"status": "ok"})))
+    state
+        .autoscale_policies
+        .write()
+        .await
+        .insert(policy.service_id.clone(), policy);
+    (
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    )
 }
 
 async fn autoscale_remove(
@@ -356,7 +405,10 @@ async fn autoscale_remove(
     axum::extract::Path(service_id): axum::extract::Path<String>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     state.autoscale_policies.write().await.remove(&service_id);
-    (axum::http::StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({"status": "ok"})),
+    )
 }
 
 // ── Alert Handlers ──
@@ -371,7 +423,10 @@ async fn alert_channels_add(
     Json(channel): Json<AlertChannel>,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
     state.alerts.write().await.channels.push(channel);
-    (axum::http::StatusCode::CREATED, Json(serde_json::json!({"status": "ok"})))
+    (
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({"status": "ok"})),
+    )
 }
 
 async fn alert_events_list(State(state): State<SharedAppState>) -> Json<Vec<AlertEvent>> {
@@ -385,74 +440,141 @@ async fn alert_events_list(State(state): State<SharedAppState>) -> Json<Vec<Aler
 async fn raft_append_entries(
     State(state): State<SharedAppState>,
     body: Bytes,
-) -> Result<(axum::http::StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Vec<u8>), (axum::http::StatusCode, String)> {
+) -> Result<
+    (
+        axum::http::StatusCode,
+        [(axum::http::HeaderName, axum::http::HeaderValue); 1],
+        Vec<u8>,
+    ),
+    (axum::http::StatusCode, String),
+> {
     let rpc: sparrow_raft::rpc_types::AppendEntriesReq =
         bincode::deserialize(&body).map_err(|e| {
-            (axum::http::StatusCode::BAD_REQUEST, format!("deserialize: {e}"))
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("deserialize: {e}"),
+            )
         })?;
     let cluster = state.raft_cluster.read().await;
     let raft = cluster.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Raft not initialized".to_string(),
+        )
     })?;
     let resp = raft.handle_append_entries(rpc).await.map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("append_entries: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("append_entries: {e}"),
+        )
     })?;
     let bytes = bincode::serialize(&resp).map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialize: {e}"),
+        )
     })?;
-    Ok((axum::http::StatusCode::OK, [(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/octet-stream"),
-    )], bytes))
+    Ok((
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        )],
+        bytes,
+    ))
 }
 
 async fn raft_vote(
     State(state): State<SharedAppState>,
     body: Bytes,
-) -> Result<(axum::http::StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Vec<u8>), (axum::http::StatusCode, String)> {
-    let rpc: sparrow_raft::rpc_types::VoteReq =
-        bincode::deserialize(&body).map_err(|e| {
-            (axum::http::StatusCode::BAD_REQUEST, format!("deserialize: {e}"))
-        })?;
+) -> Result<
+    (
+        axum::http::StatusCode,
+        [(axum::http::HeaderName, axum::http::HeaderValue); 1],
+        Vec<u8>,
+    ),
+    (axum::http::StatusCode, String),
+> {
+    let rpc: sparrow_raft::rpc_types::VoteReq = bincode::deserialize(&body).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("deserialize: {e}"),
+        )
+    })?;
     let cluster = state.raft_cluster.read().await;
     let raft = cluster.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Raft not initialized".to_string(),
+        )
     })?;
     let resp = raft.handle_vote(rpc).await.map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("vote: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("vote: {e}"),
+        )
     })?;
     let bytes = bincode::serialize(&resp).map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialize: {e}"),
+        )
     })?;
-    Ok((axum::http::StatusCode::OK, [(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/octet-stream"),
-    )], bytes))
+    Ok((
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        )],
+        bytes,
+    ))
 }
 
 async fn raft_snapshot(
     State(state): State<SharedAppState>,
     body: Bytes,
-) -> Result<(axum::http::StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Vec<u8>), (axum::http::StatusCode, String)> {
+) -> Result<
+    (
+        axum::http::StatusCode,
+        [(axum::http::HeaderName, axum::http::HeaderValue); 1],
+        Vec<u8>,
+    ),
+    (axum::http::StatusCode, String),
+> {
     let cluster = state.raft_cluster.read().await;
     let raft = cluster.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Raft not initialized".to_string(),
+        )
     })?;
 
-    let snap: sparrow_raft::rpc_types::SnapshotWire =
-        bincode::deserialize(&body).map_err(|e| {
-            (axum::http::StatusCode::BAD_REQUEST, format!("deserialize snapshot: {e}"))
-        })?;
+    let snap: sparrow_raft::rpc_types::SnapshotWire = bincode::deserialize(&body).map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("deserialize snapshot: {e}"),
+        )
+    })?;
     let resp = raft.handle_snapshot(snap).await.map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("snapshot: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("snapshot: {e}"),
+        )
     })?;
     let bytes = bincode::serialize(&resp).map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialize: {e}"),
+        )
     })?;
-    Ok((axum::http::StatusCode::OK, [(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/octet-stream"),
-    )], bytes))
+    Ok((
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        )],
+        bytes,
+    ))
 }
 
 // ── Raft Add Learner ──
@@ -469,12 +591,22 @@ async fn raft_add_learner(
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let cluster = state.raft_cluster.read().await;
     let raft = cluster.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Raft not initialized".to_string(),
+        )
     })?;
-    raft.add_learner(req.node_id, &req.addr).await.map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("add_learner: {e}"))
-    })?;
-    Ok(Json(serde_json::json!({"status": "ok", "node_id": req.node_id})))
+    raft.add_learner(req.node_id, &req.addr)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("add_learner: {e}"),
+            )
+        })?;
+    Ok(Json(
+        serde_json::json!({"status": "ok", "node_id": req.node_id}),
+    ))
 }
 
 // ── Init ──
@@ -496,7 +628,9 @@ pub fn init_cluster_with_auth(
     auth_token: Option<String>,
 ) -> SharedAppState {
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let cluster = ClusterState {
         name: name.to_string(),
         nodes: HashMap::from([(
@@ -519,7 +653,10 @@ pub fn init_cluster_with_auth(
         container_ips: RwLock::new(HashMap::new()),
         round_robin: RwLock::new(HashMap::new()),
         autoscale_policies: RwLock::new(HashMap::new()),
-        alerts: RwLock::new(AlertState { channels: vec![], events: vec![] }),
+        alerts: RwLock::new(AlertState {
+            channels: vec![],
+            events: vec![],
+        }),
         raft_cluster: RwLock::new(raft_cluster),
         state_store: None,
         rate_limiter: RwLock::new(HashMap::new()),
@@ -533,18 +670,29 @@ async fn service_list(
     State(state): State<SharedAppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     let services = store.list_services().map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("list: {e}"),
+        )
     })?;
-    Ok(Json(services.into_iter().map(|s| {
-        serde_json::json!({
-            "id": s.id, "name": s.name, "image": s.image,
-            "desired_replicas": s.desired_replicas,
-            "ports": s.ports, "created_at": s.created_at,
-        })
-    }).collect()))
+    Ok(Json(
+        services
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id, "name": s.name, "image": s.image,
+                    "desired_replicas": s.desired_replicas,
+                    "ports": s.ports, "created_at": s.created_at,
+                })
+            })
+            .collect(),
+    ))
 }
 
 async fn service_get(
@@ -552,13 +700,25 @@ async fn service_get(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
-    let svc = store.get_service(&id).map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("get: {e}"))
-    })?.ok_or_else(|| {
-        (axum::http::StatusCode::NOT_FOUND, format!("Service '{id}' not found"))
-    })?;
+    let svc = store
+        .get_service(&id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("get: {e}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("Service '{id}' not found"),
+            )
+        })?;
     let containers = store.get_service_containers(&svc.id).unwrap_or_default();
     Ok(Json(serde_json::json!({
         "service": {
@@ -575,10 +735,16 @@ async fn service_delete(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     let removed = store.delete_service(&id).map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("delete: {e}"),
+        )
     })?;
     Ok(Json(serde_json::json!({"removed": removed})))
 }
@@ -594,19 +760,33 @@ async fn service_scale(
     Json(req): Json<ScaleRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     let updated = store.update_replicas(&id, req.replicas).map_err(|e| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("scale: {e}"))
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("scale: {e}"),
+        )
     })?;
-    Ok(Json(serde_json::json!({"updated": updated, "replicas": req.replicas})))
+    Ok(Json(
+        serde_json::json!({"updated": updated, "replicas": req.replicas}),
+    ))
 }
 
 // ── AppState helpers for main.rs ──
 
 impl AppState {
     /// Register or update a proxy route for a service
-    pub async fn register_route(&self, domain: &str, service_name: &str, target_port: u16, tls: bool) {
+    pub async fn register_route(
+        &self,
+        domain: &str,
+        service_name: &str,
+        target_port: u16,
+        tls: bool,
+    ) {
         let mut routes = self.proxy_routes.write().await;
         routes.retain(|r| r.domain != domain);
         routes.push(ProxyRoute {

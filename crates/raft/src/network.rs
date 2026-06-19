@@ -1,12 +1,13 @@
 use std::future::Future;
 
 use openraft::{
-    BasicNode, RaftNetworkFactory, RaftNetworkV2,
     errors::{RPCError, ReplicationClosed, StreamingError, Unreachable},
     network::RPCOption,
-    raft::{AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse},
+    raft::{
+        AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
+    },
     type_config::alias::{SnapshotOf, VoteOf},
-    OptionalSend,
+    BasicNode, OptionalSend, RaftNetworkFactory, RaftNetworkV2,
 };
 
 use crate::cluster::SnapshotWire;
@@ -51,7 +52,10 @@ impl NetworkConnection {
             .add_root_certificate(ca)
             .identity(identity)
             .build()?;
-        Ok(Self { peer_url: base_url, client })
+        Ok(Self {
+            peer_url: base_url,
+            client,
+        })
     }
 }
 
@@ -65,8 +69,9 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
         let url = format!("{}/raft/append_entries", self.peer_url);
         let client = self.client.clone();
         async move {
-            let body = bincode::serialize(&rpc)
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("serialize: {e}"))))?;
+            let body = bincode::serialize(&rpc).map_err(|e| {
+                RPCError::Unreachable(Unreachable::from_string(format!("serialize: {e}")))
+            })?;
             let resp = client
                 .post(&url)
                 .header("content-type", "application/octet-stream")
@@ -74,11 +79,15 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("request: {e}"))))?;
-            let bytes = resp.bytes().await
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("read: {e}"))))?;
-            bincode::deserialize(&bytes)
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("deserialize: {e}"))))
+                .map_err(|e| {
+                    RPCError::Unreachable(Unreachable::from_string(format!("request: {e}")))
+                })?;
+            let bytes = resp.bytes().await.map_err(|e| {
+                RPCError::Unreachable(Unreachable::from_string(format!("read: {e}")))
+            })?;
+            bincode::deserialize(&bytes).map_err(|e| {
+                RPCError::Unreachable(Unreachable::from_string(format!("deserialize: {e}")))
+            })
         }
     }
 
@@ -86,13 +95,13 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
         &mut self,
         rpc: VoteRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> impl Future<Output = Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>>> + Send
-    {
+    ) -> impl Future<Output = Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>>> + Send {
         let url = format!("{}/raft/vote", self.peer_url);
         let client = self.client.clone();
         async move {
-            let body = bincode::serialize(&rpc)
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("serialize: {e}"))))?;
+            let body = bincode::serialize(&rpc).map_err(|e| {
+                RPCError::Unreachable(Unreachable::from_string(format!("serialize: {e}")))
+            })?;
             let resp = client
                 .post(&url)
                 .header("content-type", "application/octet-stream")
@@ -100,11 +109,15 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("request: {e}"))))?;
-            let bytes = resp.bytes().await
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("read: {e}"))))?;
-            bincode::deserialize(&bytes)
-                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("deserialize: {e}"))))
+                .map_err(|e| {
+                    RPCError::Unreachable(Unreachable::from_string(format!("request: {e}")))
+                })?;
+            let bytes = resp.bytes().await.map_err(|e| {
+                RPCError::Unreachable(Unreachable::from_string(format!("read: {e}")))
+            })?;
+            bincode::deserialize(&bytes).map_err(|e| {
+                RPCError::Unreachable(Unreachable::from_string(format!("deserialize: {e}")))
+            })
         }
     }
 
@@ -118,11 +131,16 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     {
         let url = format!("{}/raft/snapshot", self.peer_url);
         let client = self.client.clone();
-        let full = SnapshotWire { vote, meta: snapshot.meta, data: snapshot.snapshot.into_inner() };
+        let full = SnapshotWire {
+            vote,
+            meta: snapshot.meta,
+            data: snapshot.snapshot.into_inner(),
+        };
 
         async move {
-            let body = bincode::serialize(&full)
-                .map_err(|e| StreamingError::Unreachable(Unreachable::from_string(format!("serialize: {e}"))))?;
+            let body = bincode::serialize(&full).map_err(|e| {
+                StreamingError::Unreachable(Unreachable::from_string(format!("serialize: {e}")))
+            })?;
             let resp = client
                 .post(&url)
                 .header("content-type", "application/octet-stream")
@@ -130,21 +148,23 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await
-                .map_err(|e| StreamingError::Unreachable(Unreachable::from_string(format!(
-                    "snapshot to {url}: {e}"
-                ))))?;
+                .map_err(|e| {
+                    StreamingError::Unreachable(Unreachable::from_string(format!(
+                        "snapshot to {url}: {e}"
+                    )))
+                })?;
 
-            let resp_bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| StreamingError::Unreachable(Unreachable::from_string(format!(
+            let resp_bytes = resp.bytes().await.map_err(|e| {
+                StreamingError::Unreachable(Unreachable::from_string(format!(
                     "snapshot response: {e}"
-                ))))?;
+                )))
+            })?;
 
-            bincode::deserialize(&resp_bytes)
-                .map_err(|e| StreamingError::Unreachable(Unreachable::from_string(format!(
+            bincode::deserialize(&resp_bytes).map_err(|e| {
+                StreamingError::Unreachable(Unreachable::from_string(format!(
                     "deserialize snapshot response: {e}"
-                ))))
+                )))
+            })
         }
     }
 }
@@ -167,7 +187,8 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
         let tls = self.tls.take();
         async move {
             match tls {
-                Some(ref cfg) => NetworkConnection::new_tls(&addr, cfg).unwrap_or_else(|_| NetworkConnection::new(&addr)),
+                Some(ref cfg) => NetworkConnection::new_tls(&addr, cfg)
+                    .unwrap_or_else(|_| NetworkConnection::new(&addr)),
                 None => NetworkConnection::new(&addr),
             }
         }

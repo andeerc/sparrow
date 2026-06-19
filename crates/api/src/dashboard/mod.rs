@@ -1,4 +1,4 @@
-use axum::{response::Html, extract::State, routing::get, Router};
+use axum::{extract::State, response::Html, routing::get, Router};
 
 use crate::SharedAppState;
 

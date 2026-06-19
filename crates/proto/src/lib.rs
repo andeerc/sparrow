@@ -9,12 +9,12 @@
 //! - `resource` — ResourceSpec (CPU/memory limits)
 //! - `id` — Geradores de ID (svc_xxx, node_xxx, ses_xxx)
 
-pub mod service;
+pub mod id;
 pub mod node;
 pub mod resource;
-pub mod id;
+pub mod service;
 
-pub use service::*;
+pub use id::*;
 pub use node::*;
 pub use resource::*;
-pub use id::*;
+pub use service::*;

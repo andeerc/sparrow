@@ -1,18 +1,20 @@
 #![allow(dead_code)]
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Router, extract::State, response::sse::{Sse, Event},
-    routing::{get, post}, Json,
+    extract::State,
     http::StatusCode,
+    response::sse::{Event, Sse},
+    routing::{get, post},
+    Json, Router,
 };
 use futures_core::Stream;
-use serde::{Serialize, Deserialize};
-use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
 use sparrow_api::SharedAppState;
 use sparrow_core::state::StateStore;
+use tokio::sync::broadcast;
 
 pub mod tools;
 use sparrow_podman::PodmanRuntime;
@@ -62,9 +64,19 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub fn new(state: SharedAppState, state_store: Arc<StateStore>, podman: Arc<PodmanRuntime>) -> Self {
+    pub fn new(
+        state: SharedAppState,
+        state_store: Arc<StateStore>,
+        podman: Arc<PodmanRuntime>,
+    ) -> Self {
         let (tx, _) = broadcast::channel(SSE_CAPACITY);
-        Self { state, state_store, podman, tx, next_id: AtomicU64::new(1) }
+        Self {
+            state,
+            state_store,
+            podman,
+            tx,
+            next_id: AtomicU64::new(1),
+        }
     }
 
     pub fn router(&self) -> Router {
@@ -198,7 +210,14 @@ async fn messages_handler(
                 serde_json::Value::Null => serde_json::json!({}),
                 v => v,
             };
-            let result = tools::handle_tool_call(tool, &params, &state.state_store, &state.app_state, &state.podman).await;
+            let result = tools::handle_tool_call(
+                tool,
+                &params,
+                &state.state_store,
+                &state.app_state,
+                &state.podman,
+            )
+            .await;
             Ok(Json(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -235,7 +254,8 @@ async fn messages_handler(
                 .and_then(|p| p.get("uri"))
                 .and_then(|u| u.as_str())
                 .unwrap_or("");
-            match resources::handle_resource_read(uri, Some(&state.podman), &state.app_state).await {
+            match resources::handle_resource_read(uri, Some(&state.podman), &state.app_state).await
+            {
                 Ok(content) => {
                     let entry = content.into_content_entry(uri);
                     Ok(Json(serde_json::json!({
@@ -246,16 +266,14 @@ async fn messages_handler(
                         }
                     })))
                 }
-                Err(err) => {
-                    Ok(Json(serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": {
-                            "code": -32602,
-                            "message": err
-                        }
-                    })))
-                }
+                Err(err) => Ok(Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32602,
+                        "message": err
+                    }
+                }))),
             }
         }
         _ => {
@@ -277,11 +295,17 @@ async fn messages_handler(
     }
 }
 
-pub async fn start_mcp(state: SharedAppState, state_store: Arc<StateStore>, podman: Arc<PodmanRuntime>, listen: &str) -> anyhow::Result<()> {
+pub async fn start_mcp(
+    state: SharedAppState,
+    state_store: Arc<StateStore>,
+    podman: Arc<PodmanRuntime>,
+    listen: &str,
+) -> anyhow::Result<()> {
     let server = McpServer::new(state, state_store, podman);
     let app = server.router();
 
-    let addr: std::net::SocketAddr = listen.parse()
+    let addr: std::net::SocketAddr = listen
+        .parse()
         .map_err(|e| anyhow::anyhow!("Invalid address '{listen}': {e}"))?;
 
     tracing::info!("MCP server listening on {addr}");

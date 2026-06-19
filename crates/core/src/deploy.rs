@@ -101,12 +101,24 @@ pub struct DeployAutoscale {
     pub cooldown_seconds: u64,
 }
 
-fn default_replicas() -> u32 { 1 }
-fn default_restart() -> String { "always".to_string() }
-fn default_protocol() -> String { "tcp".to_string() }
-fn default_autoscale_min() -> u32 { 1 }
-fn default_autoscale_max() -> u32 { 10 }
-fn default_cooldown() -> u64 { 60 }
+fn default_replicas() -> u32 {
+    1
+}
+fn default_restart() -> String {
+    "always".to_string()
+}
+fn default_protocol() -> String {
+    "tcp".to_string()
+}
+fn default_autoscale_min() -> u32 {
+    1
+}
+fn default_autoscale_max() -> u32 {
+    10
+}
+fn default_cooldown() -> u64 {
+    60
+}
 
 impl DeployManifest {
     /// Parse a YAML deploy manifest from file path
@@ -122,7 +134,10 @@ impl DeployManifest {
             .map_err(|e| anyhow::anyhow!("Failed to parse deploy manifest: {}", e))?;
 
         if manifest.api_version != "sparrow/v1" {
-            anyhow::bail!("Unsupported apiVersion '{}', expected 'sparrow/v1'", manifest.api_version);
+            anyhow::bail!(
+                "Unsupported apiVersion '{}', expected 'sparrow/v1'",
+                manifest.api_version
+            );
         }
         if manifest.kind != "Service" {
             anyhow::bail!("Unsupported kind '{}', expected 'Service'", manifest.kind);
@@ -137,22 +152,41 @@ impl DeployManifest {
         let mut spec = ServiceSpec::new(&self.metadata.name, &image);
         spec.desired_replicas = self.spec.replicas;
 
-        spec.ports = self.spec.ports.iter().map(|p| PortMapping {
-            published: p.published,
-            target: p.target,
-            protocol: if p.protocol.to_lowercase() == "udp" { Protocol::Udp } else { Protocol::Tcp },
-        }).collect();
+        spec.ports = self
+            .spec
+            .ports
+            .iter()
+            .map(|p| PortMapping {
+                published: p.published,
+                target: p.target,
+                protocol: if p.protocol.to_lowercase() == "udp" {
+                    Protocol::Udp
+                } else {
+                    Protocol::Tcp
+                },
+            })
+            .collect();
 
-        spec.env = self.spec.env.iter().map(|e| EnvVar {
-            key: e.name.clone(),
-            value: e.value.clone(),
-        }).collect();
+        spec.env = self
+            .spec
+            .env
+            .iter()
+            .map(|e| EnvVar {
+                key: e.name.clone(),
+                value: e.value.clone(),
+            })
+            .collect();
 
-        spec.volumes = self.spec.volumes.iter().map(|v| VolumeMount {
-            source: v.source.clone(),
-            target: v.target.clone(),
-            read_only: v.read_only,
-        }).collect();
+        spec.volumes = self
+            .spec
+            .volumes
+            .iter()
+            .map(|v| VolumeMount {
+                source: v.source.clone(),
+                target: v.target.clone(),
+                read_only: v.read_only,
+            })
+            .collect();
 
         spec.networks = self.spec.networks.clone();
 
@@ -173,7 +207,6 @@ impl DeployManifest {
         spec
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -279,18 +312,30 @@ spec:
 
     #[test]
     fn test_ensure_registry_adds_docker_io() {
-        assert_eq!(ensure_registry("nginx:alpine"), "docker.io/library/nginx:alpine");
+        assert_eq!(
+            ensure_registry("nginx:alpine"),
+            "docker.io/library/nginx:alpine"
+        );
         assert_eq!(ensure_registry("nginx"), "docker.io/library/nginx");
     }
 
     #[test]
     fn test_ensure_registry_preserves_full_path() {
-        assert_eq!(ensure_registry("docker.io/nginx:latest"), "docker.io/nginx:latest");
-        assert_eq!(ensure_registry("ghcr.io/org/image:v1"), "ghcr.io/org/image:v1");
+        assert_eq!(
+            ensure_registry("docker.io/nginx:latest"),
+            "docker.io/nginx:latest"
+        );
+        assert_eq!(
+            ensure_registry("ghcr.io/org/image:v1"),
+            "ghcr.io/org/image:v1"
+        );
     }
 
     #[test]
     fn test_ensure_registry_user_image() {
-        assert_eq!(ensure_registry("myuser/myimage:tag"), "docker.io/myuser/myimage:tag");
+        assert_eq!(
+            ensure_registry("myuser/myimage:tag"),
+            "docker.io/myuser/myimage:tag"
+        );
     }
 }

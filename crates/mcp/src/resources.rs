@@ -64,7 +64,11 @@ async fn status_resource(state: &SharedAppState) -> Result<ResourceContent, Stri
         .collect();
 
     let total = cluster.nodes.len();
-    let ready = cluster.nodes.values().filter(|n| n.status == "ready").count();
+    let ready = cluster
+        .nodes
+        .values()
+        .filter(|n| n.status == "ready")
+        .count();
     let unreachable = cluster
         .nodes
         .values()
@@ -153,7 +157,9 @@ mod tests {
     #[tokio::test]
     async fn test_status_contains_cluster_name() {
         let app = sparrow_api::init_cluster("my-cluster", "leader-1", "10.0.0.1:7443", None);
-        let result = handle_resource_read("sparrow://status", None, &app).await.unwrap();
+        let result = handle_resource_read("sparrow://status", None, &app)
+            .await
+            .unwrap();
         assert!(result.text.contains("my-cluster"));
         assert!(result.text.contains("leader-1"));
     }

@@ -96,8 +96,12 @@ pub struct LoggingConfig {
     pub retention_days: u32,
 }
 
-fn default_max_log_size() -> u64 { 100 }
-fn default_log_retention() -> u32 { 30 }
+fn default_max_log_size() -> u64 {
+    100
+}
+fn default_log_retention() -> u32 {
+    30
+}
 
 impl Default for LoggingConfig {
     fn default() -> Self {
@@ -219,7 +223,8 @@ impl SparrowConfig {
     }
 
     pub fn default_path() -> std::path::PathBuf {
-        let mut path = dirs_config_dir().unwrap_or_else(|| std::path::PathBuf::from("/etc/sparrow"));
+        let mut path =
+            dirs_config_dir().unwrap_or_else(|| std::path::PathBuf::from("/etc/sparrow"));
         path.push("sparrow.yaml");
         path
     }

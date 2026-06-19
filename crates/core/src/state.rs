@@ -1,9 +1,9 @@
+use crate::crypto;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use sparrow_proto::*;
 use std::path::Path;
 use std::sync::Mutex;
-use crate::crypto;
 
 pub struct StateStore {
     conn: Mutex<Connection>,
@@ -18,7 +18,9 @@ impl StateStore {
         }
 
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=1000;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=1000;",
+        )?;
 
         let store = Self {
             conn: Mutex::new(conn),
@@ -35,24 +37,26 @@ impl StateStore {
         }
     }
 
-fn conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
-    self.conn.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))
-}
+    fn conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))
+    }
 
-pub fn backup(&self, dest: &str) -> anyhow::Result<()> {
-    // Flush WAL then copy the database file
-    let conn = self.conn()?;
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    drop(conn);
-    std::fs::copy(&self.db_path, dest)?;
-    Ok(())
-}
+    pub fn backup(&self, dest: &str) -> anyhow::Result<()> {
+        // Flush WAL then copy the database file
+        let conn = self.conn()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(conn);
+        std::fs::copy(&self.db_path, dest)?;
+        Ok(())
+    }
 
-pub fn vacuum(&self) -> anyhow::Result<()> {
-    let conn = self.conn()?;
-    conn.execute_batch("VACUUM;")?;
-    Ok(())
-}
+    pub fn vacuum(&self) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
 
     fn migrate(&self) -> anyhow::Result<()> {
         let conn = self.conn()?;
@@ -185,43 +189,55 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         let mut stmt = conn.prepare(
             "SELECT published, target, protocol FROM service_ports WHERE service_id = ?1",
         )?;
-        let ports = stmt.query_map(params![service_id], |row| {
-            Ok(PortMapping {
-                published: row.get(0)?,
-                target: row.get(1)?,
-                protocol: {
-                    let p: String = row.get(2)?;
-                    serde_json::from_str(&format!("\"{p}\"")).unwrap_or_default()
-                },
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let ports = stmt
+            .query_map(params![service_id], |row| {
+                Ok(PortMapping {
+                    published: row.get(0)?,
+                    target: row.get(1)?,
+                    protocol: {
+                        let p: String = row.get(2)?;
+                        serde_json::from_str(&format!("\"{p}\"")).unwrap_or_default()
+                    },
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(ports)
     }
 
     fn load_env(&self, conn: &Connection, service_id: &str) -> anyhow::Result<Vec<EnvVar>> {
-        let mut stmt = conn.prepare(
-            "SELECT key, value FROM service_env WHERE service_id = ?1",
-        )?;
-        let env = stmt.query_map(params![service_id], |row| {
-            Ok(EnvVar { key: row.get(0)?, value: row.get(1)? })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let mut stmt = conn.prepare("SELECT key, value FROM service_env WHERE service_id = ?1")?;
+        let env = stmt
+            .query_map(params![service_id], |row| {
+                Ok(EnvVar {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(env)
     }
 
-    fn load_volumes(&self, conn: &Connection, service_id: &str) -> anyhow::Result<Vec<VolumeMount>> {
+    fn load_volumes(
+        &self,
+        conn: &Connection,
+        service_id: &str,
+    ) -> anyhow::Result<Vec<VolumeMount>> {
         let mut stmt = conn.prepare(
             "SELECT source, target, read_only FROM service_volumes WHERE service_id = ?1",
         )?;
-        let volumes = stmt.query_map(params![service_id], |row| {
-            let read_only: i32 = row.get(2)?;
-            Ok(VolumeMount { source: row.get(0)?, target: row.get(1)?, read_only: read_only != 0 })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let volumes = stmt
+            .query_map(params![service_id], |row| {
+                let read_only: i32 = row.get(2)?;
+                Ok(VolumeMount {
+                    source: row.get(0)?,
+                    target: row.get(1)?,
+                    read_only: read_only != 0,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(volumes)
     }
 
@@ -246,13 +262,17 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
             "INSERT INTO service_ports (service_id, published, target, protocol) VALUES (?1, ?2, ?3, ?4)",
         )?;
         for p in &spec.ports {
-            stmt.execute(params![spec.id, p.published, p.target, format!("{:?}", p.protocol)])?;
+            stmt.execute(params![
+                spec.id,
+                p.published,
+                p.target,
+                format!("{:?}", p.protocol)
+            ])?;
         }
 
         // Env vars
-        let mut stmt = conn.prepare(
-            "INSERT INTO service_env (service_id, key, value) VALUES (?1, ?2, ?3)",
-        )?;
+        let mut stmt =
+            conn.prepare("INSERT INTO service_env (service_id, key, value) VALUES (?1, ?2, ?3)")?;
         for e in &spec.env {
             stmt.execute(params![spec.id, e.key, e.value])?;
         }
@@ -266,9 +286,8 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         }
 
         // Networks
-        let mut stmt = conn.prepare(
-            "INSERT INTO service_networks (service_id, network) VALUES (?1, ?2)",
-        )?;
+        let mut stmt =
+            conn.prepare("INSERT INTO service_networks (service_id, network) VALUES (?1, ?2)")?;
         for n in &spec.networks {
             stmt.execute(params![spec.id, n])?;
         }
@@ -286,8 +305,15 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
             .query_map([], |row| {
                 let created: String = row.get(5)?;
                 let updated: String = row.get(6)?;
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
-                    row.get::<_, u32>(3)?, row.get::<_, String>(4)?, created, updated))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, String>(4)?,
+                    created,
+                    updated,
+                ))
             })?
             .filter_map(|r| r.ok())
             .map(|(id, name, image, desired, rp, created, updated)| {
@@ -295,9 +321,13 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
                 let env = self.load_env(&conn, &id).unwrap_or_default();
                 let volumes = self.load_volumes(&conn, &id).unwrap_or_default();
                 Ok(ServiceSpec {
-                    id, name, image,
+                    id,
+                    name,
+                    image,
                     desired_replicas: desired,
-                    ports, env, volumes,
+                    ports,
+                    env,
+                    volumes,
                     networks: vec![],
                     labels: std::collections::HashMap::new(),
                     resources: None,
@@ -319,7 +349,11 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         Ok(services)
     }
 
-    pub fn get_service_with_conn(&self, conn: &Connection, id_or_name: &str) -> anyhow::Result<Option<ServiceSpec>> {
+    pub fn get_service_with_conn(
+        &self,
+        conn: &Connection,
+        id_or_name: &str,
+    ) -> anyhow::Result<Option<ServiceSpec>> {
         let mut stmt = conn.prepare(
             "SELECT id, name, image, desired_replicas, restart_policy, created_at, updated_at
              FROM services WHERE id = ?1 OR name = ?1",
@@ -328,8 +362,15 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         let mut rows = stmt.query_map(params![id_or_name], |row| {
             let created: String = row.get(5)?;
             let updated: String = row.get(6)?;
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
-                row.get::<_, u32>(3)?, row.get::<_, String>(4)?, created, updated))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u32>(3)?,
+                row.get::<_, String>(4)?,
+                created,
+                updated,
+            ))
         })?;
 
         match rows.next() {
@@ -338,9 +379,13 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
                 let env = self.load_env(conn, &id).unwrap_or_default();
                 let volumes = self.load_volumes(conn, &id).unwrap_or_default();
                 Ok(Some(ServiceSpec {
-                    id, name, image,
+                    id,
+                    name,
+                    image,
                     desired_replicas: desired,
-                    ports, env, volumes,
+                    ports,
+                    env,
+                    volumes,
                     networks: vec![],
                     labels: std::collections::HashMap::new(),
                     resources: None,
@@ -374,10 +419,22 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         };
 
         if let Some(svc_id) = svc {
-            conn.execute("DELETE FROM service_ports WHERE service_id = ?1", params![svc_id])?;
-            conn.execute("DELETE FROM service_env WHERE service_id = ?1", params![svc_id])?;
-            conn.execute("DELETE FROM service_volumes WHERE service_id = ?1", params![svc_id])?;
-            conn.execute("DELETE FROM service_networks WHERE service_id = ?1", params![svc_id])?;
+            conn.execute(
+                "DELETE FROM service_ports WHERE service_id = ?1",
+                params![svc_id],
+            )?;
+            conn.execute(
+                "DELETE FROM service_env WHERE service_id = ?1",
+                params![svc_id],
+            )?;
+            conn.execute(
+                "DELETE FROM service_volumes WHERE service_id = ?1",
+                params![svc_id],
+            )?;
+            conn.execute(
+                "DELETE FROM service_networks WHERE service_id = ?1",
+                params![svc_id],
+            )?;
             conn.execute("DELETE FROM services WHERE id = ?1", params![svc_id])?;
             Ok(true)
         } else {
@@ -427,7 +484,11 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         self.record_container(container_name, service_id, image, replica_seq, state, "")
     }
 
-    pub fn update_container_state(&self, container_name: &str, state: &str) -> anyhow::Result<bool> {
+    pub fn update_container_state(
+        &self,
+        container_name: &str,
+        state: &str,
+    ) -> anyhow::Result<bool> {
         let conn = self.conn()?;
         let affected = conn.execute(
             "UPDATE containers SET state = ?1 WHERE container_name = ?2",
@@ -501,7 +562,10 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    pub fn get_autoscale(&self, service_id: &str) -> anyhow::Result<Option<(AutoscalingConfig, bool)>> {
+    pub fn get_autoscale(
+        &self,
+        service_id: &str,
+    ) -> anyhow::Result<Option<(AutoscalingConfig, bool)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT min_replicas, max_replicas, cpu_target_percent, mem_target_percent, cooldown_seconds, paused
@@ -542,23 +606,28 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    pub fn list_autoscale_events(&self, service_id: &str, limit: u32) -> anyhow::Result<Vec<AutoscaleEvent>> {
+    pub fn list_autoscale_events(
+        &self,
+        service_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<AutoscaleEvent>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT decision, replicas_from, replicas_to, reason, created_at
              FROM autoscale_events WHERE service_id = ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
-        let events = stmt.query_map(params![service_id, limit], |row| {
-            Ok(AutoscaleEvent {
-                decision: row.get(0)?,
-                replicas_from: row.get(1)?,
-                replicas_to: row.get(2)?,
-                reason: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let events = stmt
+            .query_map(params![service_id, limit], |row| {
+                Ok(AutoscaleEvent {
+                    decision: row.get(0)?,
+                    replicas_from: row.get(1)?,
+                    replicas_to: row.get(2)?,
+                    reason: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(events)
     }
 
@@ -568,20 +637,21 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
             "SELECT id, name, metric, operator, threshold, duration_secs, enabled, created_at
              FROM alert_rules ORDER BY created_at DESC",
         )?;
-        let rules = stmt.query_map([], |row| {
-            Ok(AlertRule {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                metric: row.get(2)?,
-                operator: row.get(3)?,
-                threshold: row.get(4)?,
-                duration_secs: row.get(5)?,
-                enabled: row.get::<_, i32>(6)? != 0,
-                created_at: row.get(7)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let rules = stmt
+            .query_map([], |row| {
+                Ok(AlertRule {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    metric: row.get(2)?,
+                    operator: row.get(3)?,
+                    threshold: row.get(4)?,
+                    duration_secs: row.get(5)?,
+                    enabled: row.get::<_, i32>(6)? != 0,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(rules)
     }
 
@@ -620,21 +690,22 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
             "SELECT channel_id, channel_type, metric, value, threshold, message, severity, status, created_at
              FROM alert_events ORDER BY created_at DESC LIMIT ?1",
         )?;
-        let events = stmt.query_map(params![limit], |row| {
-            Ok(AlertEventRecord {
-                channel_id: row.get(0)?,
-                channel_type: row.get(1)?,
-                metric: row.get(2)?,
-                value: row.get(3)?,
-                threshold: row.get(4)?,
-                message: row.get(5)?,
-                severity: row.get(6)?,
-                status: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let events = stmt
+            .query_map(params![limit], |row| {
+                Ok(AlertEventRecord {
+                    channel_id: row.get(0)?,
+                    channel_type: row.get(1)?,
+                    metric: row.get(2)?,
+                    value: row.get(3)?,
+                    threshold: row.get(4)?,
+                    message: row.get(5)?,
+                    severity: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(events)
     }
 
@@ -669,21 +740,22 @@ pub fn vacuum(&self) -> anyhow::Result<()> {
             "SELECT id, channel_type, name, config_json, enabled, created_at
              FROM alert_channels ORDER BY created_at DESC",
         )?;
-        let channels = stmt.query_map([], |row| {
-            let encrypted: String = row.get(3)?;
-            let decrypted = crypto::decrypt(&encrypted, "sparrow-alert-key")
-                .unwrap_or_else(|| encrypted.clone());
-            Ok(AlertChannelRecord {
-                id: row.get(0)?,
-                channel_type: row.get(1)?,
-                name: row.get(2)?,
-                config_json: decrypted,
-                enabled: row.get::<_, i32>(4)? != 0,
-                created_at: row.get(5)?,
-            })
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+        let channels = stmt
+            .query_map([], |row| {
+                let encrypted: String = row.get(3)?;
+                let decrypted = crypto::decrypt(&encrypted, "sparrow-alert-key")
+                    .unwrap_or_else(|| encrypted.clone());
+                Ok(AlertChannelRecord {
+                    id: row.get(0)?,
+                    channel_type: row.get(1)?,
+                    name: row.get(2)?,
+                    config_json: decrypted,
+                    enabled: row.get::<_, i32>(4)? != 0,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(channels)
     }
 }
@@ -788,7 +860,9 @@ mod tests {
         let spec = make_spec("container-test", "nginx", 1);
         store.create_service(&spec).unwrap();
 
-        store.record_container("web-1", &spec.id, "nginx", 1, "Running", "").unwrap();
+        store
+            .record_container("web-1", &spec.id, "nginx", 1, "Running", "")
+            .unwrap();
         let containers = store.get_service_containers(&spec.id).unwrap();
         assert_eq!(containers.len(), 1);
         assert_eq!(containers[0].name, "web-1");
@@ -803,9 +877,15 @@ mod tests {
         let spec = make_spec("multi-container", "nginx", 3);
         store.create_service(&spec).unwrap();
 
-store.record_container("svc-1", &spec.id, "nginx", 1, "Running", "").unwrap();
-store.record_container("svc-2", &spec.id, "nginx", 2, "Running", "").unwrap();
-store.record_container("svc-3", &spec.id, "nginx", 3, "Failed", "").unwrap();
+        store
+            .record_container("svc-1", &spec.id, "nginx", 1, "Running", "")
+            .unwrap();
+        store
+            .record_container("svc-2", &spec.id, "nginx", 2, "Running", "")
+            .unwrap();
+        store
+            .record_container("svc-3", &spec.id, "nginx", 3, "Failed", "")
+            .unwrap();
 
         let containers = store.get_service_containers(&spec.id).unwrap();
         assert_eq!(containers.len(), 3);
@@ -818,7 +898,9 @@ store.record_container("svc-3", &spec.id, "nginx", 3, "Failed", "").unwrap();
         let (store, dir) = setup_store();
         let spec = make_spec("state-test", "nginx", 1);
         store.create_service(&spec).unwrap();
-        store.record_container("c1", &spec.id, "nginx", 1, "Running", "").unwrap();
+        store
+            .record_container("c1", &spec.id, "nginx", 1, "Running", "")
+            .unwrap();
         store.update_container_state("c1", "Stopped").unwrap();
 
         let containers = store.get_service_containers(&spec.id).unwrap();
@@ -907,9 +989,15 @@ store.record_container("svc-3", &spec.id, "nginx", 3, "Failed", "").unwrap();
     #[test]
     fn test_multiple_services() {
         let (store, dir) = setup_store();
-        store.create_service(&make_spec("svc-a", "nginx", 1)).unwrap();
-        store.create_service(&make_spec("svc-b", "redis", 1)).unwrap();
-        store.create_service(&make_spec("svc-c", "postgres", 1)).unwrap();
+        store
+            .create_service(&make_spec("svc-a", "nginx", 1))
+            .unwrap();
+        store
+            .create_service(&make_spec("svc-b", "redis", 1))
+            .unwrap();
+        store
+            .create_service(&make_spec("svc-c", "postgres", 1))
+            .unwrap();
 
         let services = store.list_services().unwrap();
         assert_eq!(services.len(), 3);

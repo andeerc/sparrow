@@ -235,12 +235,18 @@ mod registry_tests {
 
         #[test]
         fn with_tag() {
-            assert_eq!(ensure_registry("nginx:latest"), "docker.io/library/nginx:latest");
+            assert_eq!(
+                ensure_registry("nginx:latest"),
+                "docker.io/library/nginx:latest"
+            );
         }
 
         #[test]
         fn with_alpine_tag() {
-            assert_eq!(ensure_registry("nginx:alpine"), "docker.io/library/nginx:alpine");
+            assert_eq!(
+                ensure_registry("nginx:alpine"),
+                "docker.io/library/nginx:alpine"
+            );
         }
 
         #[test]
@@ -253,7 +259,10 @@ mod registry_tests {
 
         #[test]
         fn with_version_tag() {
-            assert_eq!(ensure_registry("postgres:15.3-alpine"), "docker.io/library/postgres:15.3-alpine");
+            assert_eq!(
+                ensure_registry("postgres:15.3-alpine"),
+                "docker.io/library/postgres:15.3-alpine"
+            );
         }
 
         #[test]
@@ -267,7 +276,10 @@ mod registry_tests {
 
         #[test]
         fn user_repo_with_tag() {
-            assert_eq!(ensure_registry("myuser/myapp:latest"), "docker.io/myuser/myapp:latest");
+            assert_eq!(
+                ensure_registry("myuser/myapp:latest"),
+                "docker.io/myuser/myapp:latest"
+            );
         }
 
         #[test]
@@ -277,7 +289,10 @@ mod registry_tests {
 
         #[test]
         fn org_repo() {
-            assert_eq!(ensure_registry("linuxserver/transmission"), "docker.io/linuxserver/transmission");
+            assert_eq!(
+                ensure_registry("linuxserver/transmission"),
+                "docker.io/linuxserver/transmission"
+            );
         }
     }
 
@@ -346,10 +361,7 @@ mod registry_tests {
 
         #[test]
         fn localhost_no_port() {
-            assert_eq!(
-                ensure_registry("localhost/myimage"),
-                "localhost/myimage"
-            );
+            assert_eq!(ensure_registry("localhost/myimage"), "localhost/myimage");
         }
 
         #[test]

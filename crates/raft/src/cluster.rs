@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
-use openraft::type_config::alias::{SnapshotMetaOf, VoteOf};
-use openraft::{Config, Raft, BasicNode};
 use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse, SnapshotResponse,
+    AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
 };
+use openraft::type_config::alias::{SnapshotMetaOf, VoteOf};
+use openraft::{BasicNode, Config, Raft};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -52,7 +52,10 @@ impl RaftCluster {
     }
 
     fn raft_db_path(&self, suffix: &str) -> String {
-        format!("{}/sparrow-{}-raft-{}.db", self.data_dir, self.node_id, suffix)
+        format!(
+            "{}/sparrow-{}-raft-{}.db",
+            self.data_dir, self.node_id, suffix
+        )
     }
 
     pub async fn init(&self) -> anyhow::Result<()> {
@@ -69,14 +72,21 @@ impl RaftCluster {
 
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
         let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"))?;
-        let network = NetworkFactory { tls: self.tls.clone() };
+        let network = NetworkFactory {
+            tls: self.tls.clone(),
+        };
 
         let raft = RaftNode::new(self.node_id, config, network, log_store, state_machine)
             .await
             .map_err(|e| anyhow::anyhow!("Raft::new failed: {e}"))?;
 
         let mut members = BTreeMap::new();
-        members.insert(self.node_id, BasicNode { addr: self.listen_addr.clone() });
+        members.insert(
+            self.node_id,
+            BasicNode {
+                addr: self.listen_addr.clone(),
+            },
+        );
         raft.initialize(members)
             .await
             .map_err(|e| anyhow::anyhow!("Raft::initialize failed: {e}"))?;
@@ -100,7 +110,9 @@ impl RaftCluster {
 
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
         let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"))?;
-        let network = NetworkFactory { tls: self.tls.clone() };
+        let network = NetworkFactory {
+            tls: self.tls.clone(),
+        };
 
         let raft = RaftNode::new(self.node_id, config, network, log_store, state_machine)
             .await
@@ -142,9 +154,15 @@ impl RaftCluster {
         let guard = self.raft.read().await;
         match guard.as_ref() {
             Some(raft) => {
-                raft.add_learner(node_id, BasicNode { addr: addr.to_string() }, true)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("add_learner failed: {e}"))?;
+                raft.add_learner(
+                    node_id,
+                    BasicNode {
+                        addr: addr.to_string(),
+                    },
+                    true,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("add_learner failed: {e}"))?;
                 tracing::info!(node_id, addr = %addr, "Learner added to cluster");
                 Ok(())
             }

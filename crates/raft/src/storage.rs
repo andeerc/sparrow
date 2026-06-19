@@ -8,8 +8,8 @@ use openraft::{
     self,
     entry::{RaftEntry, RaftPayload},
     storage::{
-        EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage,
-        RaftSnapshotBuilder, RaftStateMachine,
+        EntryResponder, IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder,
+        RaftStateMachine,
     },
     type_config::alias,
     OptionalSend, Snapshot, StoredMembership,
@@ -294,9 +294,7 @@ impl RaftSnapshotBuilder<C> for SnapshotBuilder {
             }
         }
 
-        let last_applied = la.unwrap_or_else(|| {
-            LE::new(*VO::new(0, 0).leader_id(), 0)
-        });
+        let last_applied = la.unwrap_or_else(|| LE::new(*VO::new(0, 0).leader_id(), 0));
 
         let state = SnapshotState {
             last_applied_term: last_applied.committed_leader_id().term,
@@ -306,8 +304,7 @@ impl RaftSnapshotBuilder<C> for SnapshotBuilder {
             membership_node_ids: members,
         };
 
-        let data = bincode::serialize(&state)
-            .map_err(io::Error::other)?;
+        let data = bincode::serialize(&state).map_err(io::Error::other)?;
 
         let snapshot_id = format!(
             "{}-{}-{}",

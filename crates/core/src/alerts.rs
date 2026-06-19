@@ -35,8 +35,16 @@ pub struct AlertDispatch {
 }
 
 impl AlertDispatch {
-    pub fn new(rx: tokio::sync::mpsc::Receiver<AlertEvent>, channels: Vec<AlertChannel>, state: Arc<StateStore>) -> Self {
-        Self { rx, channels, state }
+    pub fn new(
+        rx: tokio::sync::mpsc::Receiver<AlertEvent>,
+        channels: Vec<AlertChannel>,
+        state: Arc<StateStore>,
+    ) -> Self {
+        Self {
+            rx,
+            channels,
+            state,
+        }
     }
 
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
@@ -58,10 +66,7 @@ impl AlertDispatch {
                 .channels
                 .iter()
                 .filter(|c| c.enabled)
-                .filter(|c| {
-                    c.channel_type == "telegram"
-                        || c.channel_type == "email"
-                })
+                .filter(|c| c.channel_type == "telegram" || c.channel_type == "email")
                 .collect();
 
             if matching.is_empty() {
@@ -156,10 +161,7 @@ impl TelegramSender {
             event.severity, event.metric, event.value, event.threshold
         );
 
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            self.bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
 
         let body = serde_json::json!({
             "chat_id": self.chat_id,
@@ -276,11 +278,7 @@ impl EmailSender {
                 Ok(_) => return Ok(true),
                 Err(e) => {
                     if attempt >= max_retries {
-                        anyhow::bail!(
-                            "email send failed after {} retries: {}",
-                            max_retries,
-                            e
-                        );
+                        anyhow::bail!("email send failed after {} retries: {}", max_retries, e);
                     }
                     warn!(
                         "email send failed (attempt {}/{}), retrying in 5s: {}",
@@ -375,8 +373,7 @@ async fn try_dispatch(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("missing to in email channel config"))?
                 .to_string();
-            let sender =
-                EmailSender::new(smtp_host, smtp_port, username, password, from, to);
+            let sender = EmailSender::new(smtp_host, smtp_port, username, password, from, to);
             sender.email_send(event).await?;
             Ok(())
         }

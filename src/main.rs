@@ -1,21 +1,24 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use clap::Parser;
 use clap::CommandFactory;
+use clap::Parser;
 use clap_complete::{generate, Shell};
 use tokio::time::{sleep, Duration};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
+use sparrow_api::init_cluster;
 use sparrow_core::autoscale::AutoscaleEngine;
-use sparrow_core::cli::{Cli, Command, UpdateAction, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction, ConfigAction};
+use sparrow_core::cli::{
+    AlertAction, AutoscaleAction, Cli, ClusterAction, Command, ConfigAction, NetworkAction,
+    NodeAction, ServiceAction, UpdateAction,
+};
 use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
+use sparrow_mcp::start_mcp;
 use sparrow_podman::PodmanRuntime;
 use sparrow_proto::*;
-use sparrow_api::init_cluster;
-use sparrow_mcp::start_mcp;
 
 mod update;
 
@@ -42,7 +45,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Init logging
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();
@@ -80,29 +85,42 @@ async fn main() -> anyhow::Result<()> {
                 .join("sparrow");
             tracing::warn!(
                 "Cannot write to {}, falling back to {}: {e}",
-                data_dir.display(), fallback.display()
+                data_dir.display(),
+                fallback.display()
             );
             std::fs::create_dir_all(&fallback)?;
             fallback
         }
-        Err(e) => return Err(anyhow::anyhow!(
-            "Failed to create data dir {}: {e}", data_dir.display()
-        )),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to create data dir {}: {e}",
+                data_dir.display()
+            ))
+        }
     };
 
     let db_path = data_dir.join("sparrow.db");
-    let db_path_str = db_path.to_str().ok_or_else(|| {
-        anyhow::anyhow!("Data path is not valid UTF-8: {}", db_path.display())
-    })?;
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Data path is not valid UTF-8: {}", db_path.display()))?;
     let state = Arc::new(StateStore::new(db_path_str)?);
 
     let runtime = Arc::new(PodmanRuntime::new(config.runtime.rootless));
 
     // Check podman availability
     let podman_ok = match runtime.check_available().await {
-        Ok(true) => { tracing::debug!("Podman available"); true }
-        Ok(false) => { tracing::warn!("Podman not found"); false }
-        Err(e) => { tracing::warn!("Podman check: {}", e); false }
+        Ok(true) => {
+            tracing::debug!("Podman available");
+            true
+        }
+        Ok(false) => {
+            tracing::warn!("Podman not found");
+            false
+        }
+        Err(e) => {
+            tracing::warn!("Podman check: {}", e);
+            false
+        }
     };
 
     if podman_ok {
@@ -129,10 +147,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Command::Cluster { action } => handle_cluster(action, &state, &config, &data_dir, &mut cluster_state).await?,
+        Command::Cluster { action } => {
+            handle_cluster(action, &state, &config, &data_dir, &mut cluster_state).await?
+        }
 
         // ── Service Commands ──
-        Command::Service { action } => handle_service(action, &state, &runtime, &data_dir, podman_ok, &cluster_state).await?,
+        Command::Service { action } => {
+            handle_service(
+                action,
+                &state,
+                &runtime,
+                &data_dir,
+                podman_ok,
+                &cluster_state,
+            )
+            .await?
+        }
 
         // ── Node Commands (Fase 2) ──
         Command::Node { action } => handle_node(action, &state, &cluster_state).await?,
@@ -161,7 +191,10 @@ async fn main() -> anyhow::Result<()> {
             match sparrow_core::deploy::DeployManifest::from_file(&file) {
                 Ok(manifest) => {
                     let spec = manifest.to_service_spec();
-                    println!("📦 Deploying '{}' ({} replicas of {})...", spec.name, spec.desired_replicas, spec.image);
+                    println!(
+                        "📦 Deploying '{}' ({} replicas of {})...",
+                        spec.name, spec.desired_replicas, spec.image
+                    );
 
                     if !podman_ok {
                         error!("❌ Podman not available (verify Podman is installed)");
@@ -169,7 +202,8 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     if spec.desired_replicas > 1 && !spec.ports.is_empty() {
-                        let host_ports: Vec<String> = spec.ports.iter().map(|p| p.published.to_string()).collect();
+                        let host_ports: Vec<String> =
+                            spec.ports.iter().map(|p| p.published.to_string()).collect();
                         eprintln!(
                             "❌ Cannot expose host ports [{ports}] with {replicas} replicas in deploy.\n\
                                Each replica would try to bind the same port — only 1 would succeed.\n\n\
@@ -190,16 +224,41 @@ async fn main() -> anyhow::Result<()> {
                     let env_base = &spec.env;
                     for i in 1..=spec.desired_replicas {
                         let cname = format!("{}-{}", spec.name, i);
-                        let ports: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
-                        let env_refs: Vec<(String, String)> = env_base.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
-                        match runtime.run_container(&cname, &spec.image, &ports, &env_refs, &std::collections::HashMap::new()).await {
+                        let ports: Vec<PortMapping> =
+                            if i == 1 { ports_base.clone() } else { vec![] };
+                        let env_refs: Vec<(String, String)> = env_base
+                            .iter()
+                            .map(|e| (e.key.clone(), e.value.clone()))
+                            .collect();
+                        match runtime
+                            .run_container(
+                                &cname,
+                                &spec.image,
+                                &ports,
+                                &env_refs,
+                                &std::collections::HashMap::new(),
+                            )
+                            .await
+                        {
                             Ok(cid) => {
-                                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Running")?;
+                                state.record_container_with_ip(
+                                    &cname,
+                                    &spec.id,
+                                    &spec.image,
+                                    i,
+                                    "Running",
+                                )?;
                                 println!("  ✅ {cname} -> {cid:.12}");
                                 success += 1;
                             }
                             Err(e) => {
-                                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Failed")?;
+                                state.record_container_with_ip(
+                                    &cname,
+                                    &spec.id,
+                                    &spec.image,
+                                    i,
+                                    "Failed",
+                                )?;
                                 eprintln!("  ❌ {cname}: {e}");
                             }
                         }
@@ -208,13 +267,23 @@ async fn main() -> anyhow::Result<()> {
                     // Configure autoscale if specified
                     if let Some(as_config) = &spec.autoscaling {
                         state.set_autoscale(&spec.id, as_config, false)?;
-                        println!("📊 Autoscale configured: min={} max={} cpu={}% mem={}%",
-                            as_config.min_replicas, as_config.max_replicas,
-                            as_config.cpu_target_percent.map_or("-".to_string(), |v| v.to_string()),
-                            as_config.memory_target_percent.map_or("-".to_string(), |v| v.to_string()));
+                        println!(
+                            "📊 Autoscale configured: min={} max={} cpu={}% mem={}%",
+                            as_config.min_replicas,
+                            as_config.max_replicas,
+                            as_config
+                                .cpu_target_percent
+                                .map_or("-".to_string(), |v| v.to_string()),
+                            as_config
+                                .memory_target_percent
+                                .map_or("-".to_string(), |v| v.to_string())
+                        );
                     }
 
-                    println!("🎯 Deploy complete: {}/{} replicas running", success, spec.desired_replicas);
+                    println!(
+                        "🎯 Deploy complete: {}/{} replicas running",
+                        success, spec.desired_replicas
+                    );
                 }
                 Err(e) => error!("❌ Deploy failed: {e}"),
             }
@@ -223,38 +292,41 @@ async fn main() -> anyhow::Result<()> {
         // ── Status ──
         Command::Status => {
             let services = state.list_services().unwrap_or_default();
-            let podman_status = if podman_ok { "✓ available" } else { "✗ not found" };
-            print_box("Sparrow Cluster Status", &[
-                ("Mode",     "Single-node"),
-                ("Podman",   podman_status),
-                ("Data",     &data_dir.display().to_string()),
-                ("Services", &services.len().to_string()),
-                ("Raft",     "Stopped (single-node)"),
-            ]);
+            let podman_status = if podman_ok {
+                "✓ available"
+            } else {
+                "✗ not found"
+            };
+            print_box(
+                "Sparrow Cluster Status",
+                &[
+                    ("Mode", "Single-node"),
+                    ("Podman", podman_status),
+                    ("Data", &data_dir.display().to_string()),
+                    ("Services", &services.len().to_string()),
+                    ("Raft", "Stopped (single-node)"),
+                ],
+            );
         }
 
         // Config handled in early return above
         Command::Config { .. } => unreachable!(),
 
         // ── Database Commands ──
-        Command::Db { operation, path } => {
-            match operation.as_str() {
-                "backup" => {
-                    let dest = path.unwrap_or_else(|| format!("{}.backup.db", config.cluster.data_dir));
-                    match state.backup(&dest) {
-                        Ok(_) => println!("✅ Database backed up to {dest}"),
-                        Err(e) => eprintln!("❌ Backup failed: {e}"),
-                    }
+        Command::Db { operation, path } => match operation.as_str() {
+            "backup" => {
+                let dest = path.unwrap_or_else(|| format!("{}.backup.db", config.cluster.data_dir));
+                match state.backup(&dest) {
+                    Ok(_) => println!("✅ Database backed up to {dest}"),
+                    Err(e) => eprintln!("❌ Backup failed: {e}"),
                 }
-                "vacuum" => {
-                    match state.vacuum() {
-                        Ok(_) => println!("✅ Database vacuumed"),
-                        Err(e) => eprintln!("❌ Vacuum failed: {e}"),
-                    }
-                }
-                _ => eprintln!("❌ Unknown operation: {operation}. Use: backup, vacuum"),
             }
-        }
+            "vacuum" => match state.vacuum() {
+                Ok(_) => println!("✅ Database vacuumed"),
+                Err(e) => eprintln!("❌ Vacuum failed: {e}"),
+            },
+            _ => eprintln!("❌ Unknown operation: {operation}. Use: backup, vacuum"),
+        },
 
         // ── Update Commands (Fase 4) ──
         Command::Update { action } => handle_update(action).await?,
@@ -308,7 +380,10 @@ async fn handle_config(action: &ConfigAction, config_path: &Path) -> anyhow::Res
             let out_path = path.as_ref().map(Path::new).unwrap_or(config_path);
 
             if out_path.exists() {
-                eprint!("⚠ Config already exists at {}. Overwrite? [y/N] ", out_path.display());
+                eprint!(
+                    "⚠ Config already exists at {}. Overwrite? [y/N] ",
+                    out_path.display()
+                );
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
                 if !input.trim().eq_ignore_ascii_case("y") {
@@ -370,22 +445,40 @@ async fn handle_config(action: &ConfigAction, config_path: &Path) -> anyhow::Res
             if *yaml {
                 println!("{}", cfg.to_yaml()?);
             } else {
-                print_box("Sparrow Configuration", &[
-                    ("Config path", &show_path.display().to_string()),
-                    ("Cluster name", &cfg.cluster.name),
-                    ("Listen", &cfg.cluster.listen),
-                    ("Raft port", &cfg.cluster.raft_port.map_or("none".to_string(), |p| p.to_string())),
-                    ("Data dir", &cfg.cluster.data_dir),
-                    ("Runtime", &cfg.runtime.backend),
-                    ("Rootless", if cfg.runtime.rootless { "yes" } else { "no" }),
-                    ("Socket", if cfg.runtime.podman_socket.is_empty() { "default" } else { &cfg.runtime.podman_socket }),
-            ("Log level", &cfg.logging.level),
-            ("Log format", &cfg.logging.format),
-            ("Log file", cfg.logging.file.as_deref().unwrap_or("stdout")),
-            ("Log max size (MB)", &cfg.logging.max_size_mb.to_string()),
-            ("Log retention (days)", &cfg.logging.retention_days.to_string()),
-                    ("API listen", &cfg.api.listen),
-                ]);
+                print_box(
+                    "Sparrow Configuration",
+                    &[
+                        ("Config path", &show_path.display().to_string()),
+                        ("Cluster name", &cfg.cluster.name),
+                        ("Listen", &cfg.cluster.listen),
+                        (
+                            "Raft port",
+                            &cfg.cluster
+                                .raft_port
+                                .map_or("none".to_string(), |p| p.to_string()),
+                        ),
+                        ("Data dir", &cfg.cluster.data_dir),
+                        ("Runtime", &cfg.runtime.backend),
+                        ("Rootless", if cfg.runtime.rootless { "yes" } else { "no" }),
+                        (
+                            "Socket",
+                            if cfg.runtime.podman_socket.is_empty() {
+                                "default"
+                            } else {
+                                &cfg.runtime.podman_socket
+                            },
+                        ),
+                        ("Log level", &cfg.logging.level),
+                        ("Log format", &cfg.logging.format),
+                        ("Log file", cfg.logging.file.as_deref().unwrap_or("stdout")),
+                        ("Log max size (MB)", &cfg.logging.max_size_mb.to_string()),
+                        (
+                            "Log retention (days)",
+                            &cfg.logging.retention_days.to_string(),
+                        ),
+                        ("API listen", &cfg.api.listen),
+                    ],
+                );
             }
         }
     }
@@ -404,31 +497,55 @@ async fn handle_cluster(
     let raft_data_dir = data_dir.display().to_string();
     match action {
         ClusterAction::Init { name, listen } => {
-            let addr = if listen.is_empty() { "0.0.0.0:7443" } else { &listen };
+            let addr = if listen.is_empty() {
+                "0.0.0.0:7443"
+            } else {
+                &listen
+            };
             println!("🔧 Initializing cluster '{name}' on {addr}...");
 
-            let raft_cluster = match (&config.cluster.tls_ca, &config.cluster.tls_cert, &config.cluster.tls_key) {
+            let raft_cluster = match (
+                &config.cluster.tls_ca,
+                &config.cluster.tls_cert,
+                &config.cluster.tls_key,
+            ) {
                 (Some(ca), Some(cert), Some(key)) => {
                     let tls = sparrow_raft::TlsConfig {
                         ca: std::fs::read(ca)?,
                         cert: std::fs::read(cert)?,
                         key: std::fs::read(key)?,
                     };
-                    std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(1, addr, tls, &raft_data_dir))
+                    std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(
+                        1,
+                        addr,
+                        tls,
+                        &raft_data_dir,
+                    ))
                 }
-                _ => {
-                    std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr, &raft_data_dir))
-                }
+                _ => std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr, &raft_data_dir)),
             };
             raft_cluster.init().await?;
 
-            let app_state = sparrow_api::init_cluster_with_auth(&name, "localhost", addr, Some(raft_cluster), config.api.auth_token.clone());
+            let app_state = sparrow_api::init_cluster_with_auth(
+                &name,
+                "localhost",
+                addr,
+                Some(raft_cluster),
+                config.api.auth_token.clone(),
+            );
             let cs_clone = app_state.clone();
             let listen_addr = addr.to_string();
             let tls_cert = config.cluster.tls_cert.clone();
             let tls_key = config.cluster.tls_key.clone();
             let api_handle = tokio::spawn(async move {
-                if let Err(e) = sparrow_api::start_api(cs_clone, &listen_addr, tls_cert.as_deref(), tls_key.as_deref()).await {
+                if let Err(e) = sparrow_api::start_api(
+                    cs_clone,
+                    &listen_addr,
+                    tls_cert.as_deref(),
+                    tls_key.as_deref(),
+                )
+                .await
+                {
                     tracing::error!("API server failed: {e}");
                 }
             });
@@ -457,56 +574,66 @@ async fn handle_cluster(
         }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");
-            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(2, "0.0.0.0:7443", &raft_data_dir));
+            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(
+                2,
+                "0.0.0.0:7443",
+                &raft_data_dir,
+            ));
             raft_cluster.join(&addr).await?;
-            let app_state = sparrow_api::init_cluster("default", "localhost", "0.0.0.0:7443", Some(raft_cluster));
+            let app_state = sparrow_api::init_cluster(
+                "default",
+                "localhost",
+                "0.0.0.0:7443",
+                Some(raft_cluster),
+            );
             *cluster_state = Some(app_state);
             println!("✅ Joined cluster at {addr}");
         }
-        ClusterAction::Status => {
-            match cluster_state {
-                Some(cs) => {
-                    let cluster = cs.cluster.read().await;
-                    let cluster_name = cluster.name.clone();
-                    let nodes: Vec<_> = cluster.nodes.values().map(|n| {
-                        format!("   {} @ {} — {} ({})", n.name, n.addr, n.role, n.status)
-                    }).collect();
-                    drop(cluster);
+        ClusterAction::Status => match cluster_state {
+            Some(cs) => {
+                let cluster = cs.cluster.read().await;
+                let cluster_name = cluster.name.clone();
+                let nodes: Vec<_> = cluster
+                    .nodes
+                    .values()
+                    .map(|n| format!("   {} @ {} — {} ({})", n.name, n.addr, n.role, n.status))
+                    .collect();
+                drop(cluster);
 
-                    let raft_leader = {
-                        let ra = cs.raft_cluster.read().await;
-                        match ra.as_ref() {
-                            Some(rc) => rc.current_leader().await,
-                            None => None,
-                        }
-                    };
+                let raft_leader = {
+                    let ra = cs.raft_cluster.read().await;
+                    match ra.as_ref() {
+                        Some(rc) => rc.current_leader().await,
+                        None => None,
+                    }
+                };
 
-                    println!("📊 Cluster: '{cluster_name}' ({} nodes)", nodes.len());
-                    for line in &nodes {
-                        println!("{line}");
-                    }
-                    if let Some(lid) = raft_leader {
-                        println!("   Raft leader: node {lid}");
-                    }
+                println!("📊 Cluster: '{cluster_name}' ({} nodes)", nodes.len());
+                for line in &nodes {
+                    println!("{line}");
                 }
-                None => {
-                    println!("📊 Cluster: single-node mode (no peers)");
-                    println!("   To form a multi-node cluster, use: sparrow cluster init");
+                if let Some(lid) = raft_leader {
+                    println!("   Raft leader: node {lid}");
                 }
             }
-        }
-        ClusterAction::Members => {
-            match cluster_state {
-                Some(cs) => {
-                    let cluster = cs.cluster.read().await;
-                    println!("📋 Cluster members:");
-                    for node in cluster.nodes.values() {
-                        println!("   {} ({}) — {} — {}", node.id, node.name, node.role, node.status);
-                    }
-                }
-                None => println!("📋 Cluster members:\n   localhost (self) — Leader"),
+            None => {
+                println!("📊 Cluster: single-node mode (no peers)");
+                println!("   To form a multi-node cluster, use: sparrow cluster init");
             }
-        }
+        },
+        ClusterAction::Members => match cluster_state {
+            Some(cs) => {
+                let cluster = cs.cluster.read().await;
+                println!("📋 Cluster members:");
+                for node in cluster.nodes.values() {
+                    println!(
+                        "   {} ({}) — {} — {}",
+                        node.id, node.name, node.role, node.status
+                    );
+                }
+            }
+            None => println!("📋 Cluster members:\n   localhost (self) — Leader"),
+        },
     }
     Ok(())
 }
@@ -522,22 +649,43 @@ async fn handle_service(
     cluster_state: &Option<sparrow_api::SharedAppState>,
 ) -> anyhow::Result<()> {
     match action {
-        ServiceAction::Create { name, image, replicas, port, env, volume, network: _, restart: _, domain, autoscale: _ } => {
+        ServiceAction::Create {
+            name,
+            image,
+            replicas,
+            port,
+            env,
+            volume,
+            network: _,
+            restart: _,
+            domain,
+            autoscale: _,
+        } => {
             if !podman_ok {
                 error!("❌ Podman not available (verify Podman is installed)");
                 std::process::exit(1);
             }
 
             // Parse ports
-            let ports: Vec<PortMapping> = port.iter().filter_map(|p| {
-                let parts: Vec<&str> = p.split(':').collect();
-                if parts.len() == 2 {
-                    Some(PortMapping { published: parts[0].parse().unwrap_or(80), target: parts[1].parse().unwrap_or(80), protocol: Protocol::Tcp })
-                } else { None }
-            }).collect();
+            let ports: Vec<PortMapping> = port
+                .iter()
+                .filter_map(|p| {
+                    let parts: Vec<&str> = p.split(':').collect();
+                    if parts.len() == 2 {
+                        Some(PortMapping {
+                            published: parts[0].parse().unwrap_or(80),
+                            target: parts[1].parse().unwrap_or(80),
+                            protocol: Protocol::Tcp,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             if replicas > 1 && !ports.is_empty() {
-                let host_ports: Vec<String> = ports.iter().map(|p| p.published.to_string()).collect();
+                let host_ports: Vec<String> =
+                    ports.iter().map(|p| p.published.to_string()).collect();
                 eprintln!(
                     "❌ Cannot expose host ports [{ports}] with {replicas} replicas.\n\
                        Each replica would try to bind the same port — only 1 would succeed.\n\n\
@@ -552,24 +700,35 @@ async fn handle_service(
             }
 
             // Parse env
-            let env_vars: Vec<EnvVar> = env.iter().filter_map(|e| {
-                let mut parts = e.splitn(2, '=');
-                match (parts.next(), parts.next()) {
-                    (Some(k), Some(v)) => Some(EnvVar { key: k.to_string(), value: v.to_string() }),
-                    _ => None,
-                }
-            }).collect();
+            let env_vars: Vec<EnvVar> = env
+                .iter()
+                .filter_map(|e| {
+                    let mut parts = e.splitn(2, '=');
+                    match (parts.next(), parts.next()) {
+                        (Some(k), Some(v)) => Some(EnvVar {
+                            key: k.to_string(),
+                            value: v.to_string(),
+                        }),
+                        _ => None,
+                    }
+                })
+                .collect();
 
-            let volumes: Vec<VolumeMount> = volume.iter().filter_map(|v| {
-                let parts: Vec<&str> = v.split(':').collect();
-                if parts.len() >= 2 {
-                    Some(VolumeMount {
-                        source: parts[0].to_string(),
-                        target: parts[1].to_string(),
-                        read_only: parts.get(2).map(|s| *s == "ro").unwrap_or(false),
-                    })
-                } else { None }
-            }).collect();
+            let volumes: Vec<VolumeMount> = volume
+                .iter()
+                .filter_map(|v| {
+                    let parts: Vec<&str> = v.split(':').collect();
+                    if parts.len() >= 2 {
+                        Some(VolumeMount {
+                            source: parts[0].to_string(),
+                            target: parts[1].to_string(),
+                            read_only: parts.get(2).map(|s| *s == "ro").unwrap_or(false),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             // Create service spec
             let mut spec = ServiceSpec::new(&name, &image);
@@ -590,19 +749,44 @@ async fn handle_service(
             for i in 1..=replicas {
                 let container_name = format!("{}-{}", name, i);
                 let port_refs: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
-                let env_refs: Vec<(String, String)> = env_base.iter().map(|e| (e.key.clone(), e.value.clone())).collect();
+                let env_refs: Vec<(String, String)> = env_base
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect();
                 let labels = std::collections::HashMap::new();
 
-                match runtime.run_container(&container_name, &image, &port_refs, &env_refs, &labels).await {
+                match runtime
+                    .run_container(&container_name, &image, &port_refs, &env_refs, &labels)
+                    .await
+                {
                     Ok(cid) => {
-                        let ip = runtime.inspect_ip(&container_name).await.unwrap_or_default();
-                        state.record_container(&container_name, &spec.id, &image, i, "Running", &ip)?;
+                        let ip = runtime
+                            .inspect_ip(&container_name)
+                            .await
+                            .unwrap_or_default();
+                        state.record_container(
+                            &container_name,
+                            &spec.id,
+                            &image,
+                            i,
+                            "Running",
+                            &ip,
+                        )?;
                         println!("  ✅ {container_name} -> {cid:.12} ({})", ip);
-                        if !ip.is_empty() { container_ips.push(ip); }
+                        if !ip.is_empty() {
+                            container_ips.push(ip);
+                        }
                         success += 1;
                     }
                     Err(e) => {
-                        state.record_container(&container_name, &spec.id, &image, i, "Failed", "")?;
+                        state.record_container(
+                            &container_name,
+                            &spec.id,
+                            &image,
+                            i,
+                            "Failed",
+                            "",
+                        )?;
                         eprintln!("  ❌ {container_name}: {e}");
                     }
                 }
@@ -610,11 +794,16 @@ async fn handle_service(
 
             if let (Some(state_ref), Some(domain_val)) = (cluster_state.as_ref(), &domain) {
                 let target_port = ports_base.first().map(|p| p.target).unwrap_or(80);
-                state_ref.register_route(domain_val, &name, target_port, false).await;
+                state_ref
+                    .register_route(domain_val, &name, target_port, false)
+                    .await;
                 for ip in &container_ips {
                     state_ref.add_container_ip(&name, ip).await;
                 }
-                println!("  🌐 Proxy route '{domain_val}' → {name}:{target_port} ({})", container_ips.len());
+                println!(
+                    "  🌐 Proxy route '{domain_val}' → {name}:{target_port} ({})",
+                    container_ips.len()
+                );
             }
 
             println!("🎯 Service '{name}' created with {success}/{replicas} replicas");
@@ -623,18 +812,26 @@ async fn handle_service(
         ServiceAction::List => {
             let services = state.list_services()?;
             if services.is_empty() {
-                println!("📭 No services. Create one: sparrow service create --name myapp --image nginx");
+                println!(
+                    "📭 No services. Create one: sparrow service create --name myapp --image nginx"
+                );
                 return Ok(());
             }
 
-            print_table(&["NAME", "IMAGE", "REPLICAS", "CREATED"], services.iter().map(|s| {
-                vec![
-                    s.name.clone(),
-                    s.image.clone(),
-                    s.desired_replicas.to_string(),
-                    s.created_at.format("%Y-%m-%d %H:%M").to_string(),
-                ]
-            }).collect());
+            print_table(
+                &["NAME", "IMAGE", "REPLICAS", "CREATED"],
+                services
+                    .iter()
+                    .map(|s| {
+                        vec![
+                            s.name.clone(),
+                            s.image.clone(),
+                            s.desired_replicas.to_string(),
+                            s.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                        ]
+                    })
+                    .collect(),
+            );
         }
 
         ServiceAction::Ps { name } => {
@@ -650,12 +847,18 @@ async fn handle_service(
                         for c in &containers {
                             let (cpu, mem) = if c.state == ContainerState::Running {
                                 runtime.stats(&c.name).await.unwrap_or((0.0, 0))
-                            } else { (0.0, 0) };
+                            } else {
+                                (0.0, 0)
+                            };
                             rows.push(vec![
                                 c.name.clone(),
                                 c.state.to_string(),
                                 format_cpu(cpu),
-                                if mem > 0 { format_bytes(mem) } else { "-".to_string() },
+                                if mem > 0 {
+                                    format_bytes(mem)
+                                } else {
+                                    "-".to_string()
+                                },
                             ]);
                         }
                         print_table(&["CONTAINER", "STATUS", "CPU", "MEM"], rows);
@@ -675,7 +878,15 @@ async fn handle_service(
                         if !svc.ports.is_empty() {
                             println!("\nPorts:");
                             for p in &svc.ports {
-                                println!("  {}:{} -> {}", match p.protocol { Protocol::Tcp => "tcp", Protocol::Udp => "udp" }, p.published, p.target);
+                                println!(
+                                    "  {}:{} -> {}",
+                                    match p.protocol {
+                                        Protocol::Tcp => "tcp",
+                                        Protocol::Udp => "udp",
+                                    },
+                                    p.published,
+                                    p.target
+                                );
                             }
                         }
                     }
@@ -685,11 +896,17 @@ async fn handle_service(
         }
 
         ServiceAction::Scale { name, replicas } => {
-            if !podman_ok { error!("❌ Podman unavailable"); return Ok(()); }
+            if !podman_ok {
+                error!("❌ Podman unavailable");
+                return Ok(());
+            }
 
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{name}' not found");
+                    return Ok(());
+                }
             };
 
             let current = runtime.list_containers(&svc.name).await?.len() as u32;
@@ -701,13 +918,28 @@ async fn handle_service(
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
                     let labels = std::collections::HashMap::new();
 
-                    match runtime.run_container(&container_name, &svc.image, &port_refs, &[], &labels).await {
+                    match runtime
+                        .run_container(&container_name, &svc.image, &port_refs, &[], &labels)
+                        .await
+                    {
                         Ok(cid) => {
-                            state.record_container_with_ip(&container_name, &svc.id, &svc.image, i, "Running")?;
+                            state.record_container_with_ip(
+                                &container_name,
+                                &svc.id,
+                                &svc.image,
+                                i,
+                                "Running",
+                            )?;
                             println!("  ✅ {container_name} -> {cid:.12}");
                         }
                         Err(e) => {
-                            state.record_container_with_ip(&container_name, &svc.id, &svc.image, i, "Failed")?;
+                            state.record_container_with_ip(
+                                &container_name,
+                                &svc.id,
+                                &svc.image,
+                                i,
+                                "Failed",
+                            )?;
                             eprintln!("  ❌ {container_name}: {e}");
                         }
                     }
@@ -731,11 +963,17 @@ async fn handle_service(
         }
 
         ServiceAction::Rm { name } => {
-            if !podman_ok { error!("❌ Podman unavailable"); return Ok(()); }
+            if !podman_ok {
+                error!("❌ Podman unavailable");
+                return Ok(());
+            }
 
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{name}' not found");
+                    return Ok(());
+                }
             };
 
             let containers = runtime.list_containers(&svc.name).await?;
@@ -756,11 +994,17 @@ async fn handle_service(
         }
 
         ServiceAction::Logs { name, tail, follow } => {
-            if !podman_ok { error!("❌ Podman unavailable"); return Ok(()); }
+            if !podman_ok {
+                error!("❌ Podman unavailable");
+                return Ok(());
+            }
 
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{name}' not found");
+                    return Ok(());
+                }
             };
 
             let containers = runtime.list_containers(&svc.name).await?;
@@ -772,8 +1016,14 @@ async fn handle_service(
             if follow {
                 let mut children = Vec::new();
                 for c in &containers {
-                    if c.state != ContainerState::Running { continue; }
-                    let prefix = if containers.len() > 1 { format!("[{}] ", c.name) } else { String::new() };
+                    if c.state != ContainerState::Running {
+                        continue;
+                    }
+                    let prefix = if containers.len() > 1 {
+                        format!("[{}] ", c.name)
+                    } else {
+                        String::new()
+                    };
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                     match runtime.logs_follow(&c.name, tail, tx).await {
                         Ok(child) => {
@@ -798,8 +1048,14 @@ async fn handle_service(
                 }
             } else {
                 for c in &containers {
-                    if c.state != ContainerState::Running { continue; }
-                    let prefix = if containers.len() > 1 { format!("[{}] ", c.name) } else { String::new() };
+                    if c.state != ContainerState::Running {
+                        continue;
+                    }
+                    let prefix = if containers.len() > 1 {
+                        format!("[{}] ", c.name)
+                    } else {
+                        String::new()
+                    };
                     match runtime.logs(&c.name, tail).await {
                         Ok(lines) => {
                             for line in &lines {
@@ -812,16 +1068,27 @@ async fn handle_service(
             }
         }
 
-        ServiceAction::Update { name, image, parallelism, delay } => {
+        ServiceAction::Update {
+            name,
+            image,
+            parallelism,
+            delay,
+        } => {
             println!("🔄 Updating '{name}' (par={parallelism}, delay={delay})...");
             let svc = match state.get_service(&name)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{name}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{name}' not found");
+                    return Ok(());
+                }
             };
 
             let new_image = match image {
                 Some(ref img) => img.clone(),
-                None => { error!("❌ No --image specified for update"); return Ok(()); }
+                None => {
+                    error!("❌ No --image specified for update");
+                    return Ok(());
+                }
             };
 
             // Simple rolling update: create new, remove old, one by one
@@ -832,10 +1099,19 @@ async fn handle_service(
                 let labels = std::collections::HashMap::new();
 
                 println!("  🚀 Deploying {new_name} ({new_image})...");
-                match runtime.run_container(&new_name, &new_image, &port_refs, &[], &labels).await {
+                match runtime
+                    .run_container(&new_name, &new_image, &port_refs, &[], &labels)
+                    .await
+                {
                     Ok(cid) => {
                         println!("    ✅ {new_name} -> {cid:.12} (waiting for {delay})");
-                        state.record_container_with_ip(&new_name, &svc.id, &new_image, (containers.len() + i + 1) as u32, "Running")?;
+                        state.record_container_with_ip(
+                            &new_name,
+                            &svc.id,
+                            &new_image,
+                            (containers.len() + i + 1) as u32,
+                            "Running",
+                        )?;
 
                         // Remove old
                         match runtime.remove_container(&c.name).await {
@@ -855,7 +1131,11 @@ async fn handle_service(
 
 // ── Node Handler (Fase 2) ──
 
-async fn handle_node(action: NodeAction, state: &StateStore, cluster_state: &Option<sparrow_api::SharedAppState>) -> anyhow::Result<()> {
+async fn handle_node(
+    action: NodeAction,
+    state: &StateStore,
+    cluster_state: &Option<sparrow_api::SharedAppState>,
+) -> anyhow::Result<()> {
     match action {
         NodeAction::List => {
             let nodes = if let Some(app_state) = cluster_state {
@@ -876,18 +1156,31 @@ async fn handle_node(action: NodeAction, state: &StateStore, cluster_state: &Opt
         NodeAction::Inspect { name } => {
             let (in_cluster, _node_list) = if let Some(app_state) = cluster_state {
                 let cluster = app_state.cluster.read().await;
-                (cluster.nodes.contains_key(&name), cluster.nodes.keys().cloned().collect::<Vec<_>>())
+                (
+                    cluster.nodes.contains_key(&name),
+                    cluster.nodes.keys().cloned().collect::<Vec<_>>(),
+                )
             } else {
                 (false, vec![])
             };
             if in_cluster || name == "localhost" || name == "self" {
                 println!("📋 Node '{}':", name);
                 let services = state.list_services()?;
-                let total: usize = services.iter().map(|s| {
-                    state.get_service_containers(&s.id).map(|cs| {
-                        cs.iter().filter(|c| c.node_id == name || name == "localhost" || name == "self").count()
-                    }).unwrap_or(0)
-                }).sum();
+                let total: usize = services
+                    .iter()
+                    .map(|s| {
+                        state
+                            .get_service_containers(&s.id)
+                            .map(|cs| {
+                                cs.iter()
+                                    .filter(|c| {
+                                        c.node_id == name || name == "localhost" || name == "self"
+                                    })
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    })
+                    .sum();
                 println!("  Containers running: {total}");
                 println!("  Status: Ready");
             } else {
@@ -945,7 +1238,8 @@ async fn handle_network(action: NetworkAction) -> anyhow::Result<()> {
             println!("🌐 Creating network '{name}' ({subnet_str})...");
             let out = tokio::process::Command::new("podman")
                 .args(["network", "create", "--subnet", subnet_str, &name])
-                .output().await?;
+                .output()
+                .await?;
             if out.status.success() {
                 println!("  ✅ Network '{name}' created");
             } else {
@@ -954,17 +1248,27 @@ async fn handle_network(action: NetworkAction) -> anyhow::Result<()> {
         }
         NetworkAction::List => {
             let out = tokio::process::Command::new("podman")
-                .args(["network", "ls", "--format", "{{.Name}}\t{{.Driver}}\t{{.Subnet}}"])
-                .output().await?;
+                .args([
+                    "network",
+                    "ls",
+                    "--format",
+                    "{{.Name}}\t{{.Driver}}\t{{.Subnet}}",
+                ])
+                .output()
+                .await?;
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let rows: Vec<Vec<String>> = stdout.lines().filter(|l| !l.is_empty()).map(|line| {
-                let parts: Vec<&str> = line.split('\t').collect();
-                vec![
-                    parts.first().unwrap_or(&"").to_string(),
-                    parts.get(1).unwrap_or(&"").to_string(),
-                    parts.get(2).unwrap_or(&"").to_string(),
-                ]
-            }).collect();
+            let rows: Vec<Vec<String>> = stdout
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    vec![
+                        parts.first().unwrap_or(&"").to_string(),
+                        parts.get(1).unwrap_or(&"").to_string(),
+                        parts.get(2).unwrap_or(&"").to_string(),
+                    ]
+                })
+                .collect();
             if !rows.is_empty() {
                 print_table(&["NAME", "DRIVER", "SUBNET"], rows);
             }
@@ -972,7 +1276,8 @@ async fn handle_network(action: NetworkAction) -> anyhow::Result<()> {
         NetworkAction::Rm { name } => {
             let out = tokio::process::Command::new("podman")
                 .args(["network", "rm", &name])
-                .output().await?;
+                .output()
+                .await?;
             if out.status.success() {
                 println!("  ✅ Network '{name}' removed");
             } else {
@@ -987,10 +1292,20 @@ async fn handle_network(action: NetworkAction) -> anyhow::Result<()> {
 
 async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow::Result<()> {
     match action {
-        AutoscaleAction::Set { service, min, max, cpu_target, mem_target, cooldown } => {
+        AutoscaleAction::Set {
+            service,
+            min,
+            max,
+            cpu_target,
+            mem_target,
+            cooldown,
+        } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{service}' not found");
+                    return Ok(());
+                }
             };
 
             let config = AutoscalingConfig {
@@ -1002,23 +1317,47 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
             };
             state.set_autoscale(&svc.id, &config, false)?;
             println!("📊 Autoscale configured for '{}'", svc.name);
-            println!("   Min: {}  Max: {}  CPU: {}%  Mem: {}%  Cooldown: {}s",
-                config.min_replicas, config.max_replicas,
-                config.cpu_target_percent.map_or("-".to_string(), |v| v.to_string()),
-                config.memory_target_percent.map_or("-".to_string(), |v| v.to_string()),
-                config.cooldown_seconds);
+            println!(
+                "   Min: {}  Max: {}  CPU: {}%  Mem: {}%  Cooldown: {}s",
+                config.min_replicas,
+                config.max_replicas,
+                config
+                    .cpu_target_percent
+                    .map_or("-".to_string(), |v| v.to_string()),
+                config
+                    .memory_target_percent
+                    .map_or("-".to_string(), |v| v.to_string()),
+                config.cooldown_seconds
+            );
         }
         AutoscaleAction::Status { service } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{service}' not found");
+                    return Ok(());
+                }
             };
             match state.get_autoscale(&svc.id)? {
                 Some((config, paused)) => {
                     println!("📊 Autoscale for '{}'", svc.name);
-                    println!("   Status:   {}", if paused { "⏸ Paused" } else { "▶ Active" });
-                    println!("   Min: {}  Max: {}", config.min_replicas, config.max_replicas);
-                    println!("   CPU target: {}%  Mem target: {}%", config.cpu_target_percent.map_or("-".to_string(), |v| v.to_string()), config.memory_target_percent.map_or("-".to_string(), |v| v.to_string()));
+                    println!(
+                        "   Status:   {}",
+                        if paused { "⏸ Paused" } else { "▶ Active" }
+                    );
+                    println!(
+                        "   Min: {}  Max: {}",
+                        config.min_replicas, config.max_replicas
+                    );
+                    println!(
+                        "   CPU target: {}%  Mem target: {}%",
+                        config
+                            .cpu_target_percent
+                            .map_or("-".to_string(), |v| v.to_string()),
+                        config
+                            .memory_target_percent
+                            .map_or("-".to_string(), |v| v.to_string())
+                    );
                     println!("   Cooldown: {}s", config.cooldown_seconds);
                 }
                 None => println!("📭 No autoscale config for '{}'", svc.name),
@@ -1027,28 +1366,37 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
         AutoscaleAction::History { service, last } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{service}' not found");
+                    return Ok(());
+                }
             };
             let limit: u32 = last.parse().unwrap_or(10);
             let events = state.list_autoscale_events(&svc.id, limit)?;
             if events.is_empty() {
                 println!("📭 No autoscale events for '{}'", svc.name);
             } else {
-                let rows: Vec<Vec<String>> = events.iter().map(|e| {
-                    vec![
-                        e.created_at.clone(),
-                        e.decision.clone(),
-                        format!("{} → {}", e.replicas_from, e.replicas_to),
-                        e.reason.clone(),
-                    ]
-                }).collect();
+                let rows: Vec<Vec<String>> = events
+                    .iter()
+                    .map(|e| {
+                        vec![
+                            e.created_at.clone(),
+                            e.decision.clone(),
+                            format!("{} → {}", e.replicas_from, e.replicas_to),
+                            e.reason.clone(),
+                        ]
+                    })
+                    .collect();
                 print_table(&["TIME", "DECISION", "REPLICAS", "REASON"], rows);
             }
         }
         AutoscaleAction::Pause { service } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{service}' not found");
+                    return Ok(());
+                }
             };
             if let Some((config, _)) = state.get_autoscale(&svc.id)? {
                 state.set_autoscale(&svc.id, &config, true)?;
@@ -1060,7 +1408,10 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
         AutoscaleAction::Resume { service } => {
             let svc = match state.get_service(&service)? {
                 Some(s) => s,
-                None => { error!("❌ Service '{service}' not found"); return Ok(()); }
+                None => {
+                    error!("❌ Service '{service}' not found");
+                    return Ok(());
+                }
             };
             if let Some((config, _)) = state.get_autoscale(&svc.id)? {
                 state.set_autoscale(&svc.id, &config, false)?;
@@ -1077,17 +1428,34 @@ async fn handle_autoscale(action: AutoscaleAction, state: &StateStore) -> anyhow
 
 async fn handle_alert(action: AlertAction, state: &StateStore) -> anyhow::Result<()> {
     match action {
-        AlertAction::Set { id, channel_type, name, bot_token, chat_id, smtp_host, smtp_port, smtp_username, smtp_password, from, to } => {
+        AlertAction::Set {
+            id,
+            channel_type,
+            name,
+            bot_token,
+            chat_id,
+            smtp_host,
+            smtp_port,
+            smtp_username,
+            smtp_password,
+            from,
+            to,
+        } => {
             let config = match channel_type.as_str() {
                 "telegram" => {
-                    let bot_token = bot_token.ok_or_else(|| anyhow::anyhow!("--bot_token required for telegram"))?;
-                    let chat_id = chat_id.ok_or_else(|| anyhow::anyhow!("--chat_id required for telegram"))?;
+                    let bot_token = bot_token
+                        .ok_or_else(|| anyhow::anyhow!("--bot_token required for telegram"))?;
+                    let chat_id = chat_id
+                        .ok_or_else(|| anyhow::anyhow!("--chat_id required for telegram"))?;
                     serde_json::json!({ "bot_token": bot_token, "chat_id": chat_id })
                 }
                 "smtp" | "email" => {
-                    let smtp_host = smtp_host.ok_or_else(|| anyhow::anyhow!("--smtp_host required for smtp"))?;
-                    let smtp_username = smtp_username.ok_or_else(|| anyhow::anyhow!("--smtp_username required for smtp"))?;
-                    let smtp_password = smtp_password.ok_or_else(|| anyhow::anyhow!("--smtp_password required for smtp"))?;
+                    let smtp_host = smtp_host
+                        .ok_or_else(|| anyhow::anyhow!("--smtp_host required for smtp"))?;
+                    let smtp_username = smtp_username
+                        .ok_or_else(|| anyhow::anyhow!("--smtp_username required for smtp"))?;
+                    let smtp_password = smtp_password
+                        .ok_or_else(|| anyhow::anyhow!("--smtp_password required for smtp"))?;
                     let from = from.ok_or_else(|| anyhow::anyhow!("--from required for smtp"))?;
                     let to = to.ok_or_else(|| anyhow::anyhow!("--to required for smtp"))?;
                     serde_json::json!({
@@ -1109,17 +1477,23 @@ async fn handle_alert(action: AlertAction, state: &StateStore) -> anyhow::Result
             if rules.is_empty() {
                 println!("📭 No alert rules configured");
             } else {
-                let rows: Vec<Vec<String>> = rules.iter().map(|r| {
-                    vec![
-                        r.id.clone(),
-                        r.name.clone(),
-                        r.metric.clone(),
-                        format!("{} {}", r.operator, r.threshold),
-                        format!("{}s", r.duration_secs),
-                        if r.enabled { "yes" } else { "no" }.to_string(),
-                    ]
-                }).collect();
-                print_table(&["ID", "NAME", "METRIC", "CONDITION", "DURATION", "ENABLED"], rows);
+                let rows: Vec<Vec<String>> = rules
+                    .iter()
+                    .map(|r| {
+                        vec![
+                            r.id.clone(),
+                            r.name.clone(),
+                            r.metric.clone(),
+                            format!("{} {}", r.operator, r.threshold),
+                            format!("{}s", r.duration_secs),
+                            if r.enabled { "yes" } else { "no" }.to_string(),
+                        ]
+                    })
+                    .collect();
+                print_table(
+                    &["ID", "NAME", "METRIC", "CONDITION", "DURATION", "ENABLED"],
+                    rows,
+                );
             }
         }
         AlertAction::History => {
@@ -1127,14 +1501,17 @@ async fn handle_alert(action: AlertAction, state: &StateStore) -> anyhow::Result
             if events.is_empty() {
                 println!("📭 No alert events recorded");
             } else {
-                let rows: Vec<Vec<String>> = events.iter().map(|e| {
-                    vec![
-                        e.created_at.clone(),
-                        e.severity.clone(),
-                        e.channel_type.clone(),
-                        e.message.clone(),
-                    ]
-                }).collect();
+                let rows: Vec<Vec<String>> = events
+                    .iter()
+                    .map(|e| {
+                        vec![
+                            e.created_at.clone(),
+                            e.severity.clone(),
+                            e.channel_type.clone(),
+                            e.message.clone(),
+                        ]
+                    })
+                    .collect();
                 print_table(&["TIME", "SEVERITY", "CHANNEL", "MESSAGE"], rows);
             }
         }
@@ -1158,7 +1535,10 @@ async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
                     println!("\nRun `sparrow update install` to upgrade.");
                 }
                 Ok(None) => {
-                    println!("✅ You are running the latest version ({}).", env!("CARGO_PKG_VERSION"));
+                    println!(
+                        "✅ You are running the latest version ({}).",
+                        env!("CARGO_PKG_VERSION")
+                    );
                 }
                 Err(e) => {
                     error!("❌ Update check failed: {e}");
@@ -1169,7 +1549,10 @@ async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
             println!("🔍 Checking for latest version...");
             match update::check().await {
                 Ok(Some(info)) => {
-                    println!("📦 Installing {} -> {} ...", info.current_tag, info.latest_tag);
+                    println!(
+                        "📦 Installing {} -> {} ...",
+                        info.current_tag, info.latest_tag
+                    );
                     if let Err(e) = update::install(&info.download_url).await {
                         error!("❌ Update failed: {e}");
                     }
@@ -1206,7 +1589,10 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
             };
 
             // Check if we have the right number of running containers
-            let running = containers.iter().filter(|c| c.state == ContainerState::Running).count();
+            let running = containers
+                .iter()
+                .filter(|c| c.state == ContainerState::Running)
+                .count();
             let desired = svc.desired_replicas as usize;
 
             // Restart failed containers
@@ -1218,9 +1604,24 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
                         continue;
                     }
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
-                    match runtime.run_container(&c.name, &svc.image, &port_refs, &[], &std::collections::HashMap::new()).await {
+                    match runtime
+                        .run_container(
+                            &c.name,
+                            &svc.image,
+                            &port_refs,
+                            &[],
+                            &std::collections::HashMap::new(),
+                        )
+                        .await
+                    {
                         Ok(cid) => {
-                            if let Err(e) = state.record_container_with_ip(&c.name, &svc.id, &svc.image, containers.len() as u32 + 1, "Running") {
+                            if let Err(e) = state.record_container_with_ip(
+                                &c.name,
+                                &svc.id,
+                                &svc.image,
+                                containers.len() as u32 + 1,
+                                "Running",
+                            ) {
                                 tracing::error!("Health: failed to record {}: {e}", c.name);
                             }
                             tracing::info!("Health: restarted {} -> {:.12}", c.name, cid);
@@ -1234,13 +1635,29 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
 
             // Scale up if missing replicas
             if running < desired {
-                tracing::warn!("Health: {} has {}/{} replicas, scaling up...", svc.name, running, desired);
+                tracing::warn!(
+                    "Health: {} has {}/{} replicas, scaling up...",
+                    svc.name,
+                    running,
+                    desired
+                );
                 for i in (running + 1)..=desired {
                     let cname = format!("{}-{}", svc.name, i);
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
-                    match runtime.run_container(&cname, &svc.image, &port_refs, &[], &std::collections::HashMap::new()).await {
+                    match runtime
+                        .run_container(
+                            &cname,
+                            &svc.image,
+                            &port_refs,
+                            &[],
+                            &std::collections::HashMap::new(),
+                        )
+                        .await
+                    {
                         Ok(cid) => {
-                            let _ = state.record_container_with_ip(&cname, &svc.id, &svc.image, i as u32, "Running");
+                            let _ = state.record_container_with_ip(
+                                &cname, &svc.id, &svc.image, i as u32, "Running",
+                            );
                             tracing::info!("Health: scaled up {} -> {:.12}", cname, cid);
                         }
                         Err(e) => tracing::error!("Health: scale up failed {}: {e}", cname),
@@ -1252,14 +1669,20 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
 }
 
 fn format_cpu(cpu: f64) -> String {
-    if cpu == 0.0 { "-".to_string() } else { format!("{:.1}%", cpu) }
+    if cpu == 0.0 {
+        "-".to_string()
+    } else {
+        format!("{:.1}%", cpu)
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = bytes as f64;
     for unit in UNITS {
-        if v < 1024.0 { return format!("{:.1}{}", v, unit); }
+        if v < 1024.0 {
+            return format!("{:.1}{}", v, unit);
+        }
         v /= 1024.0;
     }
     format!("{:.1}TiB", v * 1024.0)
@@ -1270,7 +1693,9 @@ fn print_box(title: &str, rows: &[(&str, &str)]) {
     let mut min_w = title.len() + 4;
     for (l, v) in rows {
         let line_w = l.len() + 2 + v.len();
-        if line_w > min_w { min_w = line_w; }
+        if line_w > min_w {
+            min_w = line_w;
+        }
     }
     let w = min_w.clamp(40, 72);
     let val_w = w.saturating_sub(label_w + 4); // 4 = "│ " (2) + "  " (2) before val; trailing " │" (2) included in w+2
@@ -1293,15 +1718,44 @@ fn print_table(headers: &[&str], rows: Vec<Vec<String>>) {
         }
     }
     let render = |cells: &[String], align: fn(usize) -> char| -> String {
-        cells.iter().enumerate().map(|(i, c)| {
-            let w = widths[i];
-            if align(i) == '^' { format!(" {:^w$} ", c) }
-            else { format!(" {:<w$} ", c) }
-        }).collect::<Vec<_>>().join("│")
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let w = widths[i];
+                if align(i) == '^' {
+                    format!(" {:^w$} ", c)
+                } else {
+                    format!(" {:<w$} ", c)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("│")
     };
-    let top = format!("┌{}┐", widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┬"));
-    let sep = format!("├{}┤", widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┼"));
-    let bot = format!("└{}┘", widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>().join("┴"));
+    let top = format!(
+        "┌{}┐",
+        widths
+            .iter()
+            .map(|w| "─".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("┬")
+    );
+    let sep = format!(
+        "├{}┤",
+        widths
+            .iter()
+            .map(|w| "─".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("┼")
+    );
+    let bot = format!(
+        "└{}┘",
+        widths
+            .iter()
+            .map(|w| "─".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("┴")
+    );
     let hdr: Vec<String> = headers.iter().map(|h| h.to_string()).collect();
 
     println!("{top}");
@@ -1312,4 +1766,3 @@ fn print_table(headers: &[&str], rows: Vec<Vec<String>>) {
     }
     println!("{bot}");
 }
-

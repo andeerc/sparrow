@@ -49,23 +49,29 @@ pub async fn check() -> Result<Option<UpdateInfo>> {
         return Err(anyhow!("Codeberg API returned {status}: {body}"));
     }
 
-    let release: Release = resp
-        .json()
-        .await
-        .context("Failed to parse release JSON")?;
+    let release: Release = resp.json().await.context("Failed to parse release JSON")?;
 
     if release.tag_name <= current_tag {
         return Ok(None);
     }
 
     let expected = platform_asset_name(&release.tag_name);
-    let asset = release.assets.iter().find(|a| a.name == expected).ok_or_else(|| {
-        anyhow!(
-            "No asset for platform ({expected}) in release {}. Available: {}",
-            release.tag_name,
-            release.assets.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")
-        )
-    })?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == expected)
+        .ok_or_else(|| {
+            anyhow!(
+                "No asset for platform ({expected}) in release {}. Available: {}",
+                release.tag_name,
+                release
+                    .assets
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
 
     Ok(Some(UpdateInfo {
         current_tag,
@@ -88,7 +94,10 @@ pub async fn install(download_url: &str) -> Result<()> {
         return Err(anyhow!("Download failed with HTTP {}", response.status()));
     }
 
-    let bytes = response.bytes().await.context("Failed to read download stream")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("Failed to read download stream")?;
     println!("  ✅ Downloaded {} bytes", bytes.len());
 
     // Write to /tmp (always writable by user)

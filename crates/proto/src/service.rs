@@ -197,3 +197,164 @@ pub struct AlertChannelRecord {
     pub enabled: bool,
     pub created_at: String,
 }
+
+/// Resolve image name to a fully qualified registry reference.
+///
+/// Plain names get `docker.io/library/` prefix. User images (with `/` but no
+/// domain) get `docker.io/` prefix. Already qualified names pass through unchanged.
+pub fn ensure_registry(image: &str) -> String {
+    if image.contains("://") {
+        return image.to_string();
+    }
+    if image.starts_with("localhost") {
+        return image.to_string();
+    }
+    match image.split_once('/') {
+        None => format!("docker.io/library/{image}"),
+        Some((first, _rest)) => {
+            if first.contains('.') || first.contains(':') {
+                image.to_string()
+            } else {
+                format!("docker.io/{image}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    mod plain_names {
+        use super::*;
+
+        #[test]
+        fn bare_name_no_tag() {
+            assert_eq!(ensure_registry("nginx"), "docker.io/library/nginx");
+        }
+
+        #[test]
+        fn with_tag() {
+            assert_eq!(ensure_registry("nginx:latest"), "docker.io/library/nginx:latest");
+        }
+
+        #[test]
+        fn with_alpine_tag() {
+            assert_eq!(ensure_registry("nginx:alpine"), "docker.io/library/nginx:alpine");
+        }
+
+        #[test]
+        fn with_digest() {
+            assert_eq!(
+                ensure_registry("alpine@sha256:abc123def456"),
+                "docker.io/library/alpine@sha256:abc123def456"
+            );
+        }
+
+        #[test]
+        fn with_version_tag() {
+            assert_eq!(ensure_registry("postgres:15.3-alpine"), "docker.io/library/postgres:15.3-alpine");
+        }
+
+        #[test]
+        fn redis_no_tag() {
+            assert_eq!(ensure_registry("redis"), "docker.io/library/redis");
+        }
+    }
+
+    mod user_images {
+        use super::*;
+
+        #[test]
+        fn user_repo_with_tag() {
+            assert_eq!(ensure_registry("myuser/myapp:latest"), "docker.io/myuser/myapp:latest");
+        }
+
+        #[test]
+        fn user_repo_no_tag() {
+            assert_eq!(ensure_registry("myuser/myapp"), "docker.io/myuser/myapp");
+        }
+
+        #[test]
+        fn org_repo() {
+            assert_eq!(ensure_registry("linuxserver/transmission"), "docker.io/linuxserver/transmission");
+        }
+    }
+
+    mod fully_qualified {
+        use super::*;
+
+        #[test]
+        fn docker_hub_library() {
+            assert_eq!(
+                ensure_registry("docker.io/library/nginx:latest"),
+                "docker.io/library/nginx:latest"
+            );
+        }
+
+        #[test]
+        fn docker_hub_user() {
+            assert_eq!(
+                ensure_registry("docker.io/myuser/myapp:tag"),
+                "docker.io/myuser/myapp:tag"
+            );
+        }
+
+        #[test]
+        fn ghcr() {
+            assert_eq!(
+                ensure_registry("ghcr.io/org/image:v1"),
+                "ghcr.io/org/image:v1"
+            );
+        }
+
+        #[test]
+        fn quay() {
+            assert_eq!(
+                ensure_registry("quay.io/podman/hello:latest"),
+                "quay.io/podman/hello:latest"
+            );
+        }
+
+        #[test]
+        fn private_registry_with_domain() {
+            assert_eq!(
+                ensure_registry("registry.example.com/app:v1"),
+                "registry.example.com/app:v1"
+            );
+        }
+
+        #[test]
+        fn private_registry_with_port() {
+            assert_eq!(
+                ensure_registry("localhost:5000/myimage:tag"),
+                "localhost:5000/myimage:tag"
+            );
+        }
+    }
+
+    mod edge_cases {
+        use super::*;
+
+        #[test]
+        fn scheme_prefix_kept() {
+            assert_eq!(
+                ensure_registry("docker://nginx:latest"),
+                "docker://nginx:latest"
+            );
+        }
+
+        #[test]
+        fn localhost_no_port() {
+            assert_eq!(
+                ensure_registry("localhost/myimage"),
+                "localhost/myimage"
+            );
+        }
+
+        #[test]
+        fn empty_string_gets_docker_io() {
+            assert_eq!(ensure_registry(""), "docker.io/library/");
+        }
+    }
+}

@@ -174,33 +174,6 @@ impl DeployManifest {
     }
 }
 
-/// If image name has no registry prefix (no dot or colon before first slash),
-/// prepend docker.io/library/.
-fn ensure_registry(image: &str) -> String {
-    let has_registry = image.contains('/') && (
-        image.starts_with("docker.io/") ||
-        image.starts_with("ghcr.io/") ||
-        image.starts_with("quay.io/") ||
-        image.starts_with("registry.") ||
-        image.starts_with("localhost/")
-    );
-    // Also detect if first segment before / contains a dot (domain) or colon (port)
-    let has_domain = if let Some((prefix, _)) = image.split_once('/') {
-        prefix.contains('.') || prefix.contains(':')
-    } else {
-        false
-    };
-
-    if image.contains('/') && (has_registry || has_domain) {
-        image.to_string()
-    } else if image.contains('/') {
-        // Has a slash but no domain-like prefix: e.g. "myuser/myimage"
-        format!("docker.io/{image}")
-    } else {
-        // Plain name like "nginx:alpine"
-        format!("docker.io/library/{image}")
-    }
-}
 
 #[cfg(test)]
 mod tests {

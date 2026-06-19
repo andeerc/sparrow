@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-api"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2250,7 +2250,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-mcp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-podman"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-proto"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "serde",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "sparrow-raft"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",

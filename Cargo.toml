@@ -11,7 +11,7 @@ members = [
 
 [package]
 name = "sparrow"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Container orchestrator - simple as Swarm, safe as Podman, fast as Rust"
 

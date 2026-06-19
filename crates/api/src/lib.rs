@@ -132,6 +132,7 @@ pub async fn start_api(
         .route("/raft/append_entries", post(raft_append_entries))
         .route("/raft/vote", post(raft_vote))
         .route("/raft/snapshot", post(raft_snapshot))
+        .route("/raft/add_learner", post(raft_add_learner))
         .merge(dashboard::routes())
         .fallback(proxy::handle_proxy)
         .with_state(state);
@@ -367,6 +368,28 @@ async fn raft_snapshot(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/octet-stream"),
     )], bytes))
+}
+
+// ── Raft Add Learner ──
+
+#[derive(Deserialize)]
+struct AddLearnerRequest {
+    node_id: u64,
+    addr: String,
+}
+
+async fn raft_add_learner(
+    State(state): State<SharedAppState>,
+    Json(req): Json<AddLearnerRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let cluster = state.raft_cluster.read().await;
+    let raft = cluster.as_ref().ok_or_else(|| {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "Raft not initialized".to_string())
+    })?;
+    raft.add_learner(req.node_id, &req.addr).await.map_err(|e| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("add_learner: {e}"))
+    })?;
+    Ok(Json(serde_json::json!({"status": "ok", "node_id": req.node_id})))
 }
 
 // ── Init ──

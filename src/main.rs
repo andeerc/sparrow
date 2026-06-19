@@ -6,7 +6,7 @@ use tokio::time::{sleep, Duration};
 use tracing_subscriber::EnvFilter;
 
 use sparrow_core::autoscale::AutoscaleEngine;
-use sparrow_core::cli::{Cli, Command, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction};
+use sparrow_core::cli::{Cli, Command, ServiceAction, ClusterAction, NodeAction, NetworkAction, AutoscaleAction, AlertAction, ConfigAction};
 use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
 use sparrow_podman::PodmanRuntime;
@@ -23,16 +23,22 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Load config
-    let config_path = Path::new("/etc/sparrow/sparrow.yaml");
-    let config = if config_path.exists() {
-        SparrowConfig::load(config_path)?
-    } else {
-        tracing::info!("No config file at {}, using defaults", config_path.display());
-        SparrowConfig::default()
+    // Resolve config path
+    let config_path: std::path::PathBuf = match cli.config.as_ref() {
+        Some(p) => Path::new(p).to_path_buf(),
+        None => SparrowConfig::default_path(),
     };
 
-    // Use XDG data dir or fallback
+    // Load config (skip for `config init` — we create the file)
+    let config = match &cli.command {
+        Command::Config { action } => match action {
+            ConfigAction::Init { .. } => SparrowConfig::default(),
+            ConfigAction::Show { .. } => load_config_or_default(&config_path),
+        },
+        _ => load_config_or_default(&config_path),
+    };
+
+    // Use XDG data dir or fallback with permission check
     let data_dir = if config.cluster.data_dir.is_empty() {
         dirs::data_dir()
             .unwrap_or_else(|| Path::new("/var/lib").to_path_buf())
@@ -40,10 +46,31 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Path::new(&config.cluster.data_dir).to_path_buf()
     };
-    std::fs::create_dir_all(&data_dir)?;
+
+    // Create data dir, fall back to user-local if permission denied
+    let data_dir = match std::fs::create_dir_all(&data_dir) {
+        Ok(_) => data_dir,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let fallback = dirs::data_dir()
+                .unwrap_or_else(|| Path::new("/tmp").to_path_buf())
+                .join("sparrow");
+            tracing::warn!(
+                "Cannot write to {}, falling back to {}: {e}",
+                data_dir.display(), fallback.display()
+            );
+            std::fs::create_dir_all(&fallback)?;
+            fallback
+        }
+        Err(e) => return Err(anyhow::anyhow!(
+            "Failed to create data dir {}: {e}", data_dir.display()
+        )),
+    };
 
     let db_path = data_dir.join("sparrow.db");
-    let state = Arc::new(StateStore::new(db_path.to_str().unwrap())?);
+    let db_path_str = db_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("Data path is not valid UTF-8: {}", db_path.display())
+    })?;
+    let state = Arc::new(StateStore::new(db_path_str)?);
 
     let runtime = Arc::new(PodmanRuntime::new(config.runtime.rootless));
 
@@ -72,8 +99,16 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cluster_state: Option<sparrow_api::SharedAppState> = None;
 
+    match &cli.command {
+        Command::Config { action } => {
+            handle_config(action, &config_path).await?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     match cli.command {
-        Command::Cluster { action } => handle_cluster(action, &state, &config, &mut cluster_state).await?,
+        Command::Cluster { action } => handle_cluster(action, &state, &config, &data_dir, &mut cluster_state).await?,
 
         // ── Service Commands ──
         Command::Service { action } => handle_service(action, &state, &runtime, &data_dir, podman_ok).await?,
@@ -91,8 +126,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Alert { action } => handle_alert(action, &state).await?,
 
         Command::Mcp { port, host } => {
+            let cluster_name = &config.cluster.name;
             let app_state = cluster_state.clone().unwrap_or_else(|| {
-                init_cluster("default", "localhost", &format!("{host}:{port}"), None)
+                init_cluster(cluster_name, "localhost", &format!("{host}:{port}"), None)
             });
             let addr = format!("{host}:{port}");
             println!("🔌 Starting MCP server on {addr}...");
@@ -161,8 +197,128 @@ async fn main() -> anyhow::Result<()> {
                 ("Raft",     "Stopped (single-node)"),
             ]);
         }
+
+        // Config handled in early return above
+        Command::Config { .. } => unreachable!(),
     }
 
+    Ok(())
+}
+
+// ── Config Helpers ──
+
+fn load_config_or_default(path: &Path) -> SparrowConfig {
+    if path.exists() {
+        SparrowConfig::load(path).unwrap_or_else(|e| {
+            eprintln!("⚠ Failed to parse config: {e}. Using defaults.");
+            SparrowConfig::default()
+        })
+    } else {
+        tracing::info!("No config file at {}, using defaults", path.display());
+        SparrowConfig::default()
+    }
+}
+
+// ── Config Handler ──
+
+async fn handle_config(action: &ConfigAction, config_path: &Path) -> anyhow::Result<()> {
+    match action {
+        ConfigAction::Init {
+            path,
+            cluster_name,
+            listen,
+            raft_port,
+            data_dir,
+            runtime_backend,
+            rootless,
+            podman_socket,
+            log_level,
+            log_format,
+            log_file,
+            api_listen,
+        } => {
+            let out_path = path.as_ref().map(Path::new).unwrap_or(config_path);
+
+            if out_path.exists() {
+                eprint!("⚠ Config already exists at {}. Overwrite? [y/N] ", out_path.display());
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("✖ Aborted.");
+                    return Ok(());
+                }
+            }
+
+            let mut cfg = SparrowConfig::default();
+
+            if let Some(v) = cluster_name {
+                cfg.cluster.name = v.clone();
+            }
+            if let Some(v) = listen {
+                cfg.cluster.listen = v.clone();
+            }
+            if let Some(v) = raft_port {
+                cfg.cluster.raft_port = Some(*v);
+            }
+            if let Some(v) = data_dir {
+                cfg.cluster.data_dir = v.clone();
+            }
+            if let Some(v) = runtime_backend {
+                cfg.runtime.backend = v.clone();
+            }
+            if let Some(v) = rootless {
+                cfg.runtime.rootless = *v;
+            }
+            if let Some(v) = podman_socket {
+                cfg.runtime.podman_socket = v.clone();
+            }
+            if let Some(v) = log_level {
+                cfg.logging.level = v.clone();
+            }
+            if let Some(v) = log_format {
+                cfg.logging.format = v.clone();
+            }
+            if let Some(v) = log_file {
+                cfg.logging.file = Some(v.clone());
+            }
+            if let Some(v) = api_listen {
+                cfg.api.listen = v.clone();
+            }
+
+            cfg.save(out_path)?;
+            println!("✅ Config written to {}", out_path.display());
+            println!("{}", cfg.to_yaml()?);
+        }
+
+        ConfigAction::Show { path, yaml } => {
+            let show_path = path.as_ref().map(Path::new).unwrap_or(config_path);
+            let cfg = if show_path.exists() {
+                SparrowConfig::load(show_path)?
+            } else {
+                eprintln!("⚠ No config at {}, showing defaults", show_path.display());
+                SparrowConfig::default()
+            };
+
+            if *yaml {
+                println!("{}", cfg.to_yaml()?);
+            } else {
+                print_box("Sparrow Configuration", &[
+                    ("Config path", &show_path.display().to_string()),
+                    ("Cluster name", &cfg.cluster.name),
+                    ("Listen", &cfg.cluster.listen),
+                    ("Raft port", &cfg.cluster.raft_port.map_or("none".to_string(), |p| p.to_string())),
+                    ("Data dir", &cfg.cluster.data_dir),
+                    ("Runtime", &cfg.runtime.backend),
+                    ("Rootless", if cfg.runtime.rootless { "yes" } else { "no" }),
+                    ("Socket", if cfg.runtime.podman_socket.is_empty() { "default" } else { &cfg.runtime.podman_socket }),
+                    ("Log level", &cfg.logging.level),
+                    ("Log format", &cfg.logging.format),
+                    ("Log file", cfg.logging.file.as_deref().unwrap_or("stdout")),
+                    ("API listen", &cfg.api.listen),
+                ]);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -172,8 +328,10 @@ async fn handle_cluster(
     action: ClusterAction,
     _state: &StateStore,
     config: &SparrowConfig,
+    data_dir: &Path,
     cluster_state: &mut Option<sparrow_api::SharedAppState>,
 ) -> anyhow::Result<()> {
+    let raft_data_dir = data_dir.display().to_string();
     match action {
         ClusterAction::Init { name, listen } => {
             let addr = if listen.is_empty() { "0.0.0.0:7443" } else { &listen };
@@ -186,10 +344,10 @@ async fn handle_cluster(
                         cert: std::fs::read(cert)?,
                         key: std::fs::read(key)?,
                     };
-                    std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(1, addr, tls))
+                    std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(1, addr, tls, &raft_data_dir))
                 }
                 _ => {
-                    std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr))
+                    std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr, &raft_data_dir))
                 }
             };
             raft_cluster.init().await?;
@@ -219,7 +377,7 @@ async fn handle_cluster(
         }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");
-            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(2, "0.0.0.0:7443"));
+            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(2, "0.0.0.0:7443", &raft_data_dir));
             raft_cluster.join(&addr).await?;
             let app_state = sparrow_api::init_cluster("default", "localhost", "0.0.0.0:7443", Some(raft_cluster));
             *cluster_state = Some(app_state);

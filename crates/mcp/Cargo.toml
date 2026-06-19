@@ -1,6 +1,6 @@
 [package]
 name = "sparrow-mcp"
-version = "0.1.0"
+version = "0.1.9"
 edition = "2021"
 
 [dependencies]
@@ -15,3 +15,6 @@ futures-core = "0.3"
 sparrow-api = { path = "../api" }
 sparrow-core = { path = "../core" }
 sparrow-podman = { path = "../podman" }
+
+[dev-dependencies]
+tempfile = "3"

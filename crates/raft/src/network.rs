@@ -63,9 +63,10 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     ) -> impl Future<Output = Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>>> + Send
     {
         let url = format!("{}/raft/append_entries", self.peer_url);
-        let body = bincode::serialize(&rpc).unwrap_or_default();
         let client = self.client.clone();
         async move {
+            let body = bincode::serialize(&rpc)
+                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("serialize: {e}"))))?;
             let resp = client
                 .post(&url)
                 .header("content-type", "application/octet-stream")
@@ -88,9 +89,10 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     ) -> impl Future<Output = Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>>> + Send
     {
         let url = format!("{}/raft/vote", self.peer_url);
-        let body = bincode::serialize(&rpc).unwrap_or_default();
         let client = self.client.clone();
         async move {
+            let body = bincode::serialize(&rpc)
+                .map_err(|e| RPCError::Unreachable(Unreachable::from_string(format!("serialize: {e}"))))?;
             let resp = client
                 .post(&url)
                 .header("content-type", "application/octet-stream")
@@ -117,9 +119,10 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
         let url = format!("{}/raft/snapshot", self.peer_url);
         let client = self.client.clone();
         let full = SnapshotWire { vote, meta: snapshot.meta, data: snapshot.snapshot.into_inner() };
-        let body = bincode::serialize(&full).unwrap_or_default();
 
         async move {
+            let body = bincode::serialize(&full)
+                .map_err(|e| StreamingError::Unreachable(Unreachable::from_string(format!("serialize: {e}"))))?;
             let resp = client
                 .post(&url)
                 .header("content-type", "application/octet-stream")
@@ -173,5 +176,59 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
                 None => NetworkConnection::new(&addr),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_connection_new() {
+        let nc = NetworkConnection::new("10.0.0.1:7443");
+        assert_eq!(nc.peer_url, "http://10.0.0.1:7443");
+    }
+
+    #[test]
+    fn test_network_connection_new_with_https() {
+        let nc = NetworkConnection::new("https://10.0.0.1:7443");
+        assert_eq!(nc.peer_url, "https://10.0.0.1:7443");
+    }
+
+    #[test]
+    fn test_network_connection_new_with_http_prefix() {
+        let nc = NetworkConnection::new("http://10.0.0.1:7443");
+        assert_eq!(nc.peer_url, "http://10.0.0.1:7443");
+    }
+
+    #[test]
+    fn test_tls_config() {
+        let tls = TlsConfig {
+            ca: vec![1, 2, 3],
+            cert: vec![4, 5, 6],
+            key: vec![7, 8, 9],
+        };
+        assert_eq!(tls.ca, vec![1, 2, 3]);
+        assert_eq!(tls.cert, vec![4, 5, 6]);
+        assert_eq!(tls.key, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn test_tls_config_clone() {
+        let tls = TlsConfig {
+            ca: vec![1],
+            cert: vec![2],
+            key: vec![3],
+        };
+        let cloned = tls.clone();
+        assert_eq!(tls.ca, cloned.ca);
+        assert_eq!(tls.cert, cloned.cert);
+        assert_eq!(tls.key, cloned.key);
+    }
+
+    #[test]
+    fn test_network_factory_default() {
+        let nf = NetworkFactory::default();
+        assert!(nf.tls.is_none());
     }
 }

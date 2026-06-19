@@ -3,6 +3,7 @@ use sparrow_podman::PodmanRuntime;
 
 const MCP_VERSION: &str = "0.1.0";
 
+#[derive(Debug)]
 pub struct ResourceContent {
     pub text: String,
     pub mime_type: String,
@@ -95,4 +96,65 @@ async fn logs_resource(podman: &PodmanRuntime, service: &str) -> Result<Resource
         text: logs.join("\n"),
         mime_type: "text/plain".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resource_content_entry() {
+        let content = ResourceContent {
+            text: "hello".into(),
+            mime_type: "text/plain".into(),
+        };
+        let entry = content.into_content_entry("sparrow://test");
+        assert_eq!(entry["uri"], "sparrow://test");
+        assert_eq!(entry["mimeType"], "text/plain");
+        assert_eq!(entry["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn test_handle_resource_read_unknown() {
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = handle_resource_read("sparrow://unknown", None, &app).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown resource"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_resource_read_missing_service() {
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = handle_resource_read("sparrow://logs/", None, &app).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing service name"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_resource_read_logs_no_podman() {
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = handle_resource_read("sparrow://logs/myapp", None, &app).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Podman runtime not available"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_resource_read_status() {
+        let app = sparrow_api::init_cluster("test-cluster", "node1", "10.0.0.1:7443", None);
+        let result = handle_resource_read("sparrow://status", None, &app).await;
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert_eq!(content.mime_type, "application/json");
+        assert!(content.text.contains("test-cluster"));
+        assert!(content.text.contains("node1"));
+        assert!(content.text.contains("nodes_total"));
+    }
+
+    #[tokio::test]
+    async fn test_status_contains_cluster_name() {
+        let app = sparrow_api::init_cluster("my-cluster", "leader-1", "10.0.0.1:7443", None);
+        let result = handle_resource_read("sparrow://status", None, &app).await.unwrap();
+        assert!(result.text.contains("my-cluster"));
+        assert!(result.text.contains("leader-1"));
+    }
 }

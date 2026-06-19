@@ -183,6 +183,20 @@ impl SparrowConfig {
         Ok(config)
     }
 
+    pub fn to_yaml(&self) -> anyhow::Result<String> {
+        serde_yaml::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))
+    }
+
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let yaml = self.to_yaml()?;
+        std::fs::write(path, &yaml)?;
+        Ok(())
+    }
+
     pub fn default_path() -> std::path::PathBuf {
         let mut path = dirs_config_dir().unwrap_or_else(|| std::path::PathBuf::from("/etc/sparrow"));
         path.push("sparrow.yaml");
@@ -191,6 +205,12 @@ impl SparrowConfig {
 }
 
 fn dirs_config_dir() -> Option<std::path::PathBuf> {
+    // Prefer user config dir (~/.config/sparrow) — works rootless without sudo
+    if let Some(mut xdg) = dirs::config_dir() {
+        xdg.push("sparrow");
+        return Some(xdg);
+    }
+    // Fallback to system-wide
     #[cfg(target_os = "linux")]
     {
         Some(std::path::PathBuf::from("/etc/sparrow"))
@@ -198,5 +218,158 @@ fn dirs_config_dir() -> Option<std::path::PathBuf> {
     #[cfg(not(target_os = "linux"))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_default_values() {
+        let cfg = SparrowConfig::default();
+        assert_eq!(cfg.cluster.name, "sparrow");
+        assert_eq!(cfg.cluster.listen, "0.0.0.0:7443");
+        assert_eq!(cfg.cluster.raft_port, Some(7444));
+        assert_eq!(cfg.cluster.data_dir, "/var/lib/sparrow");
+        assert_eq!(cfg.cluster.tls_ca, None);
+        assert_eq!(cfg.runtime.backend, "podman");
+        assert_eq!(cfg.runtime.rootless, true);
+        assert_eq!(cfg.logging.level, "info");
+        assert_eq!(cfg.logging.format, "plain");
+        assert_eq!(cfg.logging.file, None);
+        assert_eq!(cfg.api.listen, "127.0.0.1:7443");
+        assert_eq!(cfg.api.tls_cert, None);
+        assert_eq!(cfg.api.tls_key, None);
+    }
+
+    #[test]
+    fn test_to_yaml_roundtrip() {
+        let mut cfg = SparrowConfig::default();
+        cfg.cluster.name = "test-cluster".into();
+        cfg.cluster.listen = "0.0.0.0:9999".into();
+        cfg.cluster.raft_port = Some(9999);
+        cfg.cluster.data_dir = "/tmp/sparrow-test".into();
+        cfg.runtime.backend = "docker".into();
+        cfg.runtime.rootless = false;
+        cfg.logging.level = "debug".into();
+        cfg.logging.format = "json".into();
+        cfg.logging.file = Some("/tmp/sparrow.log".into());
+        cfg.api.listen = "127.0.0.1:9999".into();
+
+        let yaml = cfg.to_yaml().unwrap();
+        let recovered: SparrowConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(recovered.cluster.name, "test-cluster");
+        assert_eq!(recovered.cluster.listen, "0.0.0.0:9999");
+        assert_eq!(recovered.cluster.raft_port, Some(9999));
+        assert_eq!(recovered.cluster.data_dir, "/tmp/sparrow-test");
+        assert_eq!(recovered.runtime.backend, "docker");
+        assert!(!recovered.runtime.rootless);
+        assert_eq!(recovered.logging.level, "debug");
+        assert_eq!(recovered.logging.format, "json");
+        assert_eq!(recovered.logging.file, Some("/tmp/sparrow.log".into()));
+        assert_eq!(recovered.api.listen, "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn test_to_yaml_contains_keys() {
+        let cfg = SparrowConfig::default();
+        let yaml = cfg.to_yaml().unwrap();
+        assert!(yaml.contains("cluster:"));
+        assert!(yaml.contains("runtime:"));
+        assert!(yaml.contains("logging:"));
+        assert!(yaml.contains("api:"));
+        assert!(yaml.contains("name: sparrow"));
+        assert!(yaml.contains("backend: podman"));
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("sparrow-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sparrow.yaml");
+
+        let mut cfg = SparrowConfig::default();
+        cfg.cluster.name = "saved-cluster".into();
+        cfg.save(&path).unwrap();
+
+        assert!(path.exists());
+        let loaded = SparrowConfig::load(&path).unwrap();
+        assert_eq!(loaded.cluster.name, "saved-cluster");
+        assert_eq!(loaded.cluster.listen, "0.0.0.0:7443");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_invalid_yaml() {
+        let dir = std::env::temp_dir().join(format!("sparrow-cfg-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.yaml");
+        std::fs::write(&path, "cluster: [invalid").unwrap();
+
+        let result = SparrowConfig::load(&path);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_nonexistent() {
+        let result = SparrowConfig::load(Path::new("/tmp/definitely-not-exist-sparrow.yaml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_path_ends_with_sparrow_yaml() {
+        let path = SparrowConfig::default_path();
+        assert!(path.ends_with("sparrow.yaml"));
+        assert!(path.to_string_lossy().contains("sparrow"));
+    }
+
+    #[test]
+    fn test_cluster_config_defaults() {
+        let cc = ClusterConfig::default();
+        assert_eq!(cc.name, "sparrow");
+        assert_eq!(cc.listen, "0.0.0.0:7443");
+        assert_eq!(cc.raft_port, Some(7444));
+        assert_eq!(cc.data_dir, "/var/lib/sparrow");
+    }
+
+    #[test]
+    fn test_api_config_defaults() {
+        let ac = ApiConfig::default();
+        assert_eq!(ac.listen, "127.0.0.1:7443");
+        assert_eq!(ac.tls_cert, None);
+        assert_eq!(ac.tls_key, None);
+    }
+
+    #[test]
+    fn test_runtime_config_defaults() {
+        let rc = RuntimeConfig::default();
+        assert_eq!(rc.backend, "podman");
+        assert!(rc.rootless);
+    }
+
+    #[test]
+    fn test_logging_config_defaults() {
+        let lc = LoggingConfig::default();
+        assert_eq!(lc.level, "info");
+        assert_eq!(lc.format, "plain");
+        assert_eq!(lc.file, None);
+    }
+
+    #[test]
+    fn test_save_creates_parent_dir() {
+        let dir = std::env::temp_dir().join(format!("sparrow-nested-{}", std::process::id()));
+        let path = dir.join("sub").join("cfg.yaml");
+
+        let cfg = SparrowConfig::default();
+        cfg.save(&path).unwrap();
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

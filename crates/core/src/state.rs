@@ -574,3 +574,233 @@ impl StateStore {
         Ok(channels)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sparrow_proto::ContainerState;
+
+    fn setup_store() -> (StateStore, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let store = StateStore::new(db.to_str().unwrap()).unwrap();
+        (store, dir.keep())
+    }
+
+    fn make_spec(name: &str, image: &str, replicas: u32) -> ServiceSpec {
+        let mut spec = ServiceSpec::new(name, image);
+        spec.desired_replicas = replicas;
+        spec
+    }
+
+    #[test]
+    fn test_create_service() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("test-svc", "nginx:alpine", 2);
+        store.create_service(&spec).unwrap();
+
+        let services = store.list_services().unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "test-svc");
+        assert_eq!(services[0].image, "nginx:alpine");
+        assert_eq!(services[0].desired_replicas, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_get_service_by_id() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("get-by-id", "redis:7", 1);
+        store.create_service(&spec).unwrap();
+
+        let found = store.get_service(&spec.id).unwrap().unwrap();
+        assert_eq!(found.name, "get-by-id");
+        assert_eq!(found.id, spec.id);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_get_service_by_name() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("get-by-name", "postgres:16", 1);
+        store.create_service(&spec).unwrap();
+
+        let found = store.get_service("get-by-name").unwrap().unwrap();
+        assert_eq!(found.id, spec.id);
+        assert_eq!(found.image, "postgres:16");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_replicas() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("scale-test", "nginx", 1);
+        store.create_service(&spec).unwrap();
+
+        store.update_replicas(&spec.id, 5).unwrap();
+        let updated = store.get_service(&spec.id).unwrap().unwrap();
+        assert_eq!(updated.desired_replicas, 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_service() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("del-svc", "alpine", 1);
+        store.create_service(&spec).unwrap();
+
+        store.delete_service(&spec.id).unwrap();
+        let services = store.list_services().unwrap();
+        assert_eq!(services.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_service_not_found() {
+        let (store, dir) = setup_store();
+        let result = store.get_service("nonexistent-id").unwrap();
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_record_container() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("container-test", "nginx", 1);
+        store.create_service(&spec).unwrap();
+
+        store.record_container("web-1", &spec.id, "nginx", 1, "Running").unwrap();
+        let containers = store.get_service_containers(&spec.id).unwrap();
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, "web-1");
+        assert_eq!(containers[0].state, ContainerState::Running);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_get_service_containers_multiple() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("multi-container", "nginx", 3);
+        store.create_service(&spec).unwrap();
+
+        store.record_container("svc-1", &spec.id, "nginx", 1, "Running").unwrap();
+        store.record_container("svc-2", &spec.id, "nginx", 2, "Running").unwrap();
+        store.record_container("svc-3", &spec.id, "nginx", 3, "Failed").unwrap();
+
+        let containers = store.get_service_containers(&spec.id).unwrap();
+        assert_eq!(containers.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_update_container_state() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("state-test", "nginx", 1);
+        store.create_service(&spec).unwrap();
+        store.record_container("c1", &spec.id, "nginx", 1, "Running").unwrap();
+        store.update_container_state("c1", "Stopped").unwrap();
+
+        let containers = store.get_service_containers(&spec.id).unwrap();
+        // "Stopped" is not a known variant, maps to ContainerState::Unknown
+        assert_eq!(containers[0].state, ContainerState::Unknown);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_autoscale() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("as-test", "nginx", 1);
+        store.create_service(&spec).unwrap();
+
+        let config = AutoscalingConfig {
+            min_replicas: 2,
+            max_replicas: 10,
+            cpu_target_percent: Some(70.0),
+            memory_target_percent: None,
+            cooldown_seconds: 60,
+        };
+        store.set_autoscale(&spec.id, &config, false).unwrap();
+
+        let (loaded, paused) = store.get_autoscale(&spec.id).unwrap().unwrap();
+        assert_eq!(loaded.min_replicas, 2);
+        assert_eq!(loaded.max_replicas, 10);
+        assert_eq!(loaded.cpu_target_percent, Some(70.0));
+        assert!(!paused);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_pause_autoscale() {
+        let (store, dir) = setup_store();
+        let spec = make_spec("pause-test", "nginx", 1);
+        store.create_service(&spec).unwrap();
+
+        let config = AutoscalingConfig {
+            min_replicas: 1,
+            max_replicas: 5,
+            cpu_target_percent: None,
+            memory_target_percent: None,
+            cooldown_seconds: 30,
+        };
+        store.set_autoscale(&spec.id, &config, true).unwrap();
+
+        let (_, paused) = store.get_autoscale(&spec.id).unwrap().unwrap();
+        assert!(paused);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_autoscale_not_found() {
+        let (store, dir) = setup_store();
+        let result = store.get_autoscale("no-such-service").unwrap();
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_duplicate_service_name() {
+        let (store, dir) = setup_store();
+        let spec1 = make_spec("unique-svc", "nginx", 1);
+        store.create_service(&spec1).unwrap();
+
+        let spec2 = make_spec("unique-svc", "alpine", 1);
+        let result = store.create_service(&spec2);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_list_services_empty() {
+        let (store, dir) = setup_store();
+        let services = store.list_services().unwrap();
+        assert!(services.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_multiple_services() {
+        let (store, dir) = setup_store();
+        store.create_service(&make_spec("svc-a", "nginx", 1)).unwrap();
+        store.create_service(&make_spec("svc-b", "redis", 1)).unwrap();
+        store.create_service(&make_spec("svc-c", "postgres", 1)).unwrap();
+
+        let services = store.list_services().unwrap();
+        assert_eq!(services.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

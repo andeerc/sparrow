@@ -141,3 +141,100 @@ fn result_error(msg: &str) -> serde_json::Value {
         "isError": true
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> sparrow_core::state::StateStore {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("tools-test.db");
+        // keep dir alive for test duration
+        let _ = dir.keep();
+        sparrow_core::state::StateStore::new(db.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_result_ok() {
+        let data = serde_json::json!({"key": "value"});
+        let result = result_ok(&data);
+        assert_eq!(result["content"][0]["type"], "text");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("key"));
+        assert!(text.contains("value"));
+    }
+
+    #[test]
+    fn test_result_error() {
+        let result = result_error("something bad");
+        assert!(result["isError"].as_bool().unwrap());
+        assert_eq!(result["content"][0]["text"], "something bad");
+    }
+
+    #[test]
+    fn test_handle_tool_call_unknown() {
+        let store = test_store();
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            handle_tool_call("nonexistent_tool", &serde_json::json!({}), &store, &app)
+        );
+        assert!(result["isError"].as_bool().unwrap_or(false));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn test_list_services_empty() {
+        let store = test_store();
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            handle_tool_call("list_services", &serde_json::json!({}), &store, &app)
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("[]") || text.contains("services"));
+    }
+
+    #[test]
+    fn test_get_service_missing_param() {
+        let store = test_store();
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            handle_tool_call("get_service", &serde_json::json!({}), &store, &app)
+        );
+        assert!(result["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_get_service_not_found() {
+        let store = test_store();
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let params = serde_json::json!({"id_or_name": "nonexistent"});
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            handle_tool_call("get_service", &params, &store, &app)
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not found") || text.contains("error"));
+    }
+
+    #[test]
+    fn test_scale_service_missing_params() {
+        let store = test_store();
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            handle_tool_call("scale_service", &serde_json::json!({}), &store, &app)
+        );
+        assert!(result["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_cluster_status() {
+        let store = test_store();
+        let app = sparrow_api::init_cluster("test-cluster", "node1", "10.0.0.1:7443", None);
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            handle_tool_call("cluster_status", &serde_json::json!({}), &store, &app)
+        );
+        let _text = result["content"][0]["text"].as_str().unwrap_or("");
+        // Should contain cluster info or at least not be an error
+        assert!(!result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+}

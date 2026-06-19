@@ -123,8 +123,38 @@ pub async fn install(download_url: &str) -> Result<()> {
         }
     })?;
 
-    println!("✅ Update installed! Restart Sparrow to use the new version.");
+    println!("✅ Update installed! Restarting Sparrow service...");
+
+    let user = std::env::var("SUDO_USER").unwrap_or_else(|_| whoami());
+    restart_systemd(&user);
+
     Ok(())
+}
+
+fn whoami() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "root".into())
+}
+
+fn restart_systemd(user: &str) {
+    let service = format!("sparrow@{user}");
+    match std::process::Command::new("systemctl")
+        .args(["restart", &service])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            println!("  ✅ Service {service} restarted");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!("  ⚠️  Failed to restart {service}: {stderr}");
+            eprintln!("  Run manually: sudo systemctl restart {service}");
+        }
+        Err(_) => {
+            eprintln!("  ℹ️  systemctl not available. Restart Sparrow manually.");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -20,6 +20,25 @@ mod update;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // When running under sudo, use the original user's HOME so config and state
+    // remain consistent regardless of privilege level.
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if sudo_user != "root" {
+            let user_home = std::process::Command::new("getent")
+                .args(["passwd", &sudo_user])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let line = String::from_utf8_lossy(&o.stdout);
+                    line.split(':').nth(5).map(|s| s.trim().to_string())
+                })
+                .unwrap_or_else(|| format!("/home/{sudo_user}"));
+            std::env::set_var("HOME", &user_home);
+            std::env::set_var("XDG_CONFIG_HOME", format!("{user_home}/.config"));
+            std::env::set_var("XDG_DATA_HOME", format!("{user_home}/.local/share"));
+        }
+    }
+
     // Init logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))

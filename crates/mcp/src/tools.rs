@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use sparrow_api::SharedAppState;
 use sparrow_core::state::StateStore;
 use sparrow_podman::PodmanRuntime;
@@ -200,6 +199,7 @@ fn result_error(msg: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn test_store() -> (sparrow_core::state::StateStore, Arc<PodmanRuntime>) {
         let dir = tempfile::tempdir().unwrap();

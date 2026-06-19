@@ -1,0 +1,14 @@
+apiVersion: sparrow/v1
+kind: Service
+metadata:
+  name: web
+spec:
+  image: nginx:alpine
+  replicas: 3
+  ports:
+    - published: 82
+      target: 80
+  autoscale:
+    min_replicas: 2
+    max_replicas: 10
+    cpu_target_percent: 70

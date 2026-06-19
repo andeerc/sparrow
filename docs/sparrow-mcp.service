@@ -1,0 +1,22 @@
+[Unit]
+Description=Sparrow MCP Server
+Documentation=https://codeberg.org/andeerc/sparrow
+After=network.target sparrow.service
+BindsTo=sparrow.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sparrow mcp --host 127.0.0.1 --port 3000
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+User=%i
+Group=%i
+
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

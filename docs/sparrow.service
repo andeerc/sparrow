@@ -1,0 +1,22 @@
+[Unit]
+Description=Sparrow - Container orchestrator (API + Dashboard + Proxy)
+Documentation=https://codeberg.org/andeerc/sparrow
+After=network.target podman.socket
+Wants=podman.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sparrow cluster init --name prod --listen 0.0.0.0:7443
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+User=%i
+Group=%i
+
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

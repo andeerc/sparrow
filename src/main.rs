@@ -362,23 +362,33 @@ async fn handle_cluster(
             let listen_addr = addr.to_string();
             let tls_cert = config.cluster.tls_cert.clone();
             let tls_key = config.cluster.tls_key.clone();
-            tokio::spawn(async move {
+            let api_handle = tokio::spawn(async move {
                 if let Err(e) = sparrow_api::start_api(cs_clone, &listen_addr, tls_cert.as_deref(), tls_key.as_deref()).await {
                     tracing::error!("API server failed: {e}");
                 }
             });
 
             let proxy_state = app_state.clone();
-            tokio::spawn(async move {
+            let proxy_handle = tokio::spawn(async move {
                 if let Err(e) = sparrow_api::start_proxy(proxy_state, 7444).await {
                     tracing::error!("Proxy server failed: {e}");
                 }
             });
 
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             println!("✅ Cluster '{name}' initialized. API on {addr}, proxy on 7444");
+            println!("   Dashboard: http://{addr}/");
             println!("   Join token: sparrow-{}-tok-{:x}", name, name.len());
+            println!("   Press Ctrl+C to stop.");
             *cluster_state = Some(app_state);
+
+            // Keep process alive until servers stop or ctrl+c
+            tokio::select! {
+                _ = api_handle => {},
+                _ = proxy_handle => {},
+                _ = tokio::signal::ctrl_c() => {
+                    println!("\n⏹ Shutting down...");
+                }
+            }
         }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");

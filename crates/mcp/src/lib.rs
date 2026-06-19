@@ -198,7 +198,7 @@ async fn messages_handler(
                 serde_json::Value::Null => serde_json::json!({}),
                 v => v,
             };
-            let result = tools::handle_tool_call(tool, &params, &state.state_store, &state.app_state).await;
+            let result = tools::handle_tool_call(tool, &params, &state.state_store, &state.app_state, &state.podman).await;
             Ok(Json(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,

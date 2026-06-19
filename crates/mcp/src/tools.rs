@@ -1,11 +1,15 @@
+use std::sync::Arc;
 use sparrow_api::SharedAppState;
 use sparrow_core::state::StateStore;
+use sparrow_podman::PodmanRuntime;
+use sparrow_proto::ServiceSpec;
 
 pub async fn handle_tool_call(
     tool: &str,
     params: &serde_json::Value,
     store: &StateStore,
     app: &SharedAppState,
+    podman: &PodmanRuntime,
 ) -> serde_json::Value {
     match tool {
         "list_services" => list_services(store),
@@ -13,7 +17,58 @@ pub async fn handle_tool_call(
         "list_nodes" => list_nodes(app).await,
         "scale_service" => scale_service(params, store),
         "cluster_status" => cluster_status(store, app).await,
+        "service_logs" => service_logs(params, podman).await,
+        "deploy_service" => deploy_service(params, store).await,
+        "remove_service" => remove_service(params, store, podman).await,
         _ => result_error(&format!("Unknown tool: {tool}")),
+    }
+}
+
+async fn service_logs(params: &serde_json::Value, podman: &PodmanRuntime) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let tail = params.get("tail").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+    if name.is_empty() {
+        return result_error("Missing required parameter: name");
+    }
+    match podman.logs(name, tail).await {
+        Ok(lines) => result_ok(&serde_json::json!({"logs": lines})),
+        Err(e) => result_error(&format!("Failed to get logs: {e}")),
+    }
+}
+
+async fn deploy_service(params: &serde_json::Value, store: &StateStore) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let image = params.get("image").and_then(|v| v.as_str()).unwrap_or("");
+    let replicas = params.get("replicas").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+    if name.is_empty() || image.is_empty() {
+        return result_error("Missing required parameters: name, image");
+    }
+    let mut spec = ServiceSpec::new(name, image);
+    spec.desired_replicas = replicas;
+    match store.create_service(&spec) {
+        Ok(_) => result_ok(&serde_json::json!({
+            "message": format!("Service '{name}' created"),
+            "id": spec.id, "replicas": replicas,
+        })),
+        Err(e) => result_error(&format!("Failed to create service: {e}")),
+    }
+}
+
+async fn remove_service(params: &serde_json::Value, store: &StateStore, podman: &PodmanRuntime) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return result_error("Missing required parameter: name");
+    }
+    let containers = podman.list_containers(name).await.unwrap_or_default();
+    for c in &containers {
+        let _ = podman.remove_container(&c.name).await;
+    }
+    match store.delete_service(name) {
+        Ok(true) => result_ok(&serde_json::json!({
+            "message": format!("Service '{name}' removed ({} containers)", containers.len()),
+        })),
+        Ok(false) => result_error(&format!("Service '{name}' not found")),
+        Err(e) => result_error(&format!("Failed to remove service: {e}")),
     }
 }
 
@@ -146,12 +201,13 @@ fn result_error(msg: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn test_store() -> sparrow_core::state::StateStore {
+    fn test_store() -> (sparrow_core::state::StateStore, Arc<PodmanRuntime>) {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("tools-test.db");
-        // keep dir alive for test duration
         let _ = dir.keep();
-        sparrow_core::state::StateStore::new(db.to_str().unwrap()).unwrap()
+        let store = sparrow_core::state::StateStore::new(db.to_str().unwrap()).unwrap();
+        let podman = Arc::new(PodmanRuntime::new(true));
+        (store, podman)
     }
 
     #[test]
@@ -173,10 +229,10 @@ mod tests {
 
     #[test]
     fn test_handle_tool_call_unknown() {
-        let store = test_store();
+        let (store, podman) = test_store();
         let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
         let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            handle_tool_call("nonexistent_tool", &serde_json::json!({}), &store, &app)
+            handle_tool_call("nonexistent_tool", &serde_json::json!({}), &store, &app, &podman)
         );
         assert!(result["isError"].as_bool().unwrap_or(false));
         let text = result["content"][0]["text"].as_str().unwrap();
@@ -185,10 +241,10 @@ mod tests {
 
     #[test]
     fn test_list_services_empty() {
-        let store = test_store();
+        let (store, podman) = test_store();
         let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
         let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            handle_tool_call("list_services", &serde_json::json!({}), &store, &app)
+            handle_tool_call("list_services", &serde_json::json!({}), &store, &app, &podman)
         );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("[]") || text.contains("services"));
@@ -196,21 +252,21 @@ mod tests {
 
     #[test]
     fn test_get_service_missing_param() {
-        let store = test_store();
+        let (store, podman) = test_store();
         let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
         let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            handle_tool_call("get_service", &serde_json::json!({}), &store, &app)
+            handle_tool_call("get_service", &serde_json::json!({}), &store, &app, &podman)
         );
         assert!(result["isError"].as_bool().unwrap_or(false));
     }
 
     #[test]
     fn test_get_service_not_found() {
-        let store = test_store();
+        let (store, podman) = test_store();
         let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
         let params = serde_json::json!({"id_or_name": "nonexistent"});
         let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            handle_tool_call("get_service", &params, &store, &app)
+            handle_tool_call("get_service", &params, &store, &app, &podman)
         );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("not found") || text.contains("error"));
@@ -218,23 +274,22 @@ mod tests {
 
     #[test]
     fn test_scale_service_missing_params() {
-        let store = test_store();
+        let (store, podman) = test_store();
         let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
         let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            handle_tool_call("scale_service", &serde_json::json!({}), &store, &app)
+            handle_tool_call("scale_service", &serde_json::json!({}), &store, &app, &podman)
         );
         assert!(result["isError"].as_bool().unwrap_or(false));
     }
 
     #[test]
     fn test_cluster_status() {
-        let store = test_store();
+        let (store, podman) = test_store();
         let app = sparrow_api::init_cluster("test-cluster", "node1", "10.0.0.1:7443", None);
         let result = tokio::runtime::Runtime::new().unwrap().block_on(
-            handle_tool_call("cluster_status", &serde_json::json!({}), &store, &app)
+            handle_tool_call("cluster_status", &serde_json::json!({}), &store, &app, &podman)
         );
         let _text = result["content"][0]["text"].as_str().unwrap_or("");
-        // Should contain cluster info or at least not be an error
         assert!(!result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
     }
 }

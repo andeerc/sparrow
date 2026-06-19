@@ -2262,6 +2262,7 @@ dependencies = [
  "sparrow-api",
  "sparrow-core",
  "sparrow-podman",
+ "sparrow-proto",
  "tempfile",
  "tokio",
  "tracing",

@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 
 pub mod tools;
 use sparrow_podman::PodmanRuntime;
+use tower_http::cors::CorsLayer;
 
 pub mod resources;
 
@@ -91,6 +92,7 @@ impl McpServer {
         Router::new()
             .route("/sse", get(sse_handler))
             .route("/messages", post(messages_handler))
+            .layer(CorsLayer::permissive())
             .with_state(state)
     }
 

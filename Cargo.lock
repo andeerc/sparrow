@@ -2446,6 +2446,8 @@ dependencies = [
  "sparrow-proto",
  "tempfile",
  "tokio",
+ "tower",
+ "tower-http",
  "tracing",
 ]
 

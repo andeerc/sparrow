@@ -41,6 +41,7 @@ impl PodmanRuntime {
         env: &[(String, String)],
         labels: &HashMap<String, String>,
     ) -> anyhow::Result<String> {
+        let image = ensure_registry(image);
         let mut cmd = tokio::process::Command::new("podman");
 
         if self.rootless {
@@ -313,4 +314,56 @@ fn parse_number_unit(s: &str) -> Option<(f64, String)> {
     let num: f64 = s[..num_end].parse().ok()?;
     let unit = s[num_end..].trim().to_string();
     Some((num, unit))
+}
+
+/// Podman (unlike Docker) doesn't auto-resolve Docker Hub short names.
+/// Prepend `docker.io/library/` when no registry and no slash (plain name like "nginx").
+/// Prepend `docker.io/` when no registry but has a slash (user/image like "myuser/myapp").
+fn ensure_registry(image: &str) -> String {
+    // Has scheme -> keep as-is (e.g. docker://, https://)
+    if image.contains("://") {
+        return image.to_string();
+    }
+    // Localhost -> keep as-is
+    if image.starts_with("localhost") {
+        return image.to_string();
+    }
+    // Split at first slash to check if registry is present
+    match image.split_once('/') {
+        None => {
+            // Plain name: "nginx:latest" -> docker.io/library/nginx:latest
+            format!("docker.io/library/{image}")
+        }
+        Some((first, _rest)) => {
+            if first.contains('.') || first.contains(':') {
+                // Has registry: "docker.io/...", "ghcr.io/...", "localhost:5000/..."
+                image.to_string()
+            } else {
+                // User/image: "myuser/myapp" -> docker.io/myuser/myapp
+                format!("docker.io/{image}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ensure_registry_adds_docker_io() {
+        assert_eq!(ensure_registry("nginx:alpine"), "docker.io/library/nginx:alpine");
+        assert_eq!(ensure_registry("nginx"), "docker.io/library/nginx");
+    }
+
+    #[test]
+    fn test_ensure_registry_preserves_full_path() {
+        assert_eq!(ensure_registry("docker.io/nginx:latest"), "docker.io/nginx:latest");
+        assert_eq!(ensure_registry("ghcr.io/org/image:v1"), "ghcr.io/org/image:v1");
+    }
+
+    #[test]
+    fn test_ensure_registry_user_image() {
+        assert_eq!(ensure_registry("myuser/myimage:tag"), "docker.io/myuser/myimage:tag");
+    }
 }

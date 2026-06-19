@@ -90,9 +90,8 @@ pub async fn install(download_url: &str) -> Result<()> {
     let bytes = response.bytes().await.context("Failed to read download stream")?;
     println!("  ✅ Downloaded {} bytes", bytes.len());
 
-    // Write to temp file next to current binary (same filesystem for atomic rename)
-    let temp_dir = current_exe.parent().unwrap_or_else(|| Path::new("/tmp"));
-    let temp_path = temp_dir.join(format!(".sparrow-update-{}", std::process::id()));
+    // Write to /tmp (always writable by user)
+    let temp_path = Path::new("/tmp").join(format!(".sparrow-update-{}", std::process::id()));
 
     std::fs::write(&temp_path, &bytes).context("Failed to write update to temp file")?;
 
@@ -103,12 +102,26 @@ pub async fn install(download_url: &str) -> Result<()> {
             .context("Failed to make update executable")?;
     }
 
-    // Atomic rename, fallback to copy+remove
-    std::fs::rename(&temp_path, &current_exe).or_else(|_| -> Result<()> {
+    // Try atomic rename (same filesystem). If fails, try copy.
+    // If copy fails with PermissionDenied, tell user to use sudo.
+    let replace = || -> std::io::Result<()> {
+        // Try rename first
+        if std::fs::rename(&temp_path, &current_exe).is_ok() {
+            return Ok(());
+        }
+        // Fallback: copy + remove temp
         std::fs::copy(&temp_path, &current_exe)?;
         let _ = std::fs::remove_file(&temp_path);
         Ok(())
-    }).context("Failed to replace current binary")?;
+    };
+
+    replace().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            anyhow!("Permission denied. Run: sudo sparrow update install")
+        } else {
+            anyhow!("Failed to replace current binary: {e}")
+        }
+    })?;
 
     println!("✅ Update installed! Restart Sparrow to use the new version.");
     Ok(())

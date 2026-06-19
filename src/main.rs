@@ -151,6 +151,18 @@ async fn main() -> anyhow::Result<()> {
                         return Ok(());
                     }
 
+                    if spec.desired_replicas > 1 && !spec.ports.is_empty() {
+                        let host_ports: Vec<String> = spec.ports.iter().map(|p| p.published.to_string()).collect();
+                        eprintln!(
+                            "❌ Cannot expose host ports [{ports}] with {replicas} replicas in deploy.\n\
+                               Each replica would try to bind the same port — only 1 would succeed.\n\n\
+                               Use replicas: 1 for direct port access, or remove ports and use --domain\n\
+                               with sparrow service create for proxy-based routing.",
+                            ports = host_ports.join(", "), replicas = spec.desired_replicas
+                        );
+                        return Ok(());
+                    }
+
                     // Persist to state store
                     state.create_service(&spec)?;
                     println!("📦 Service '{}' ({}) created", spec.name, spec.id);

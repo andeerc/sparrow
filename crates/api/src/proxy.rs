@@ -32,6 +32,16 @@ impl ProxyService {
     }
 
     pub async fn resolve_target(&self, route: &ProxyRoute) -> (String, u16) {
+        let ips = self.state.container_ips.read().await;
+        if let Some(container_ips) = ips.get(&route.service_name) {
+            if !container_ips.is_empty() {
+                let mut rr = self.state.round_robin.write().await;
+                let idx = rr.entry(route.service_name.clone()).or_insert(0);
+                let ip = &container_ips[*idx % container_ips.len()];
+                *idx += 1;
+                return (ip.clone(), route.target_port);
+            }
+        }
         ("127.0.0.1".to_string(), route.target_port)
     }
 

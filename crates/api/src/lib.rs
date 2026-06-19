@@ -82,6 +82,8 @@ pub struct AlertState {
 pub struct AppState {
     pub cluster: RwLock<ClusterState>,
     pub proxy_routes: RwLock<Vec<ProxyRoute>>,
+    pub container_ips: RwLock<HashMap<String, Vec<String>>>,
+    pub round_robin: RwLock<HashMap<String, usize>>,
     pub autoscale_policies: RwLock<HashMap<String, AutoscalePolicy>>,
     pub alerts: RwLock<AlertState>,
     pub raft_cluster: RwLock<Option<std::sync::Arc<sparrow_raft::RaftCluster>>>,
@@ -421,8 +423,48 @@ pub fn init_cluster(
     Arc::new(AppState {
         cluster: RwLock::new(cluster),
         proxy_routes: RwLock::new(vec![]),
+        container_ips: RwLock::new(HashMap::new()),
+        round_robin: RwLock::new(HashMap::new()),
         autoscale_policies: RwLock::new(HashMap::new()),
         alerts: RwLock::new(AlertState { channels: vec![], events: vec![] }),
         raft_cluster: RwLock::new(raft_cluster),
     })
+}
+
+// ── AppState helpers for main.rs ──
+
+impl AppState {
+    /// Register or update a proxy route for a service
+    pub async fn register_route(&self, domain: &str, service_name: &str, target_port: u16, tls: bool) {
+        let mut routes = self.proxy_routes.write().await;
+        routes.retain(|r| r.domain != domain);
+        routes.push(ProxyRoute {
+            domain: domain.to_string(),
+            target_port,
+            service_name: service_name.to_string(),
+            tls,
+        });
+    }
+
+    /// Remove proxy route for a domain
+    pub async fn remove_route(&self, domain: &str) {
+        let mut routes = self.proxy_routes.write().await;
+        routes.retain(|r| r.domain != domain);
+    }
+
+    /// Update the container IP cache for a service (add or update a container IP)
+    pub async fn add_container_ip(&self, service_name: &str, ip: &str) {
+        let mut ips = self.container_ips.write().await;
+        ips.entry(service_name.to_string())
+            .or_insert_with(Vec::new)
+            .push(ip.to_string());
+    }
+
+    /// Remove a container IP from the cache
+    pub async fn remove_container_ip(&self, service_name: &str, ip: &str) {
+        let mut ips = self.container_ips.write().await;
+        if let Some(list) = ips.get_mut(service_name) {
+            list.retain(|i| i != ip);
+        }
+    }
 }

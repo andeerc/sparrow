@@ -135,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Cluster { action } => handle_cluster(action, &state, &config, &data_dir, &mut cluster_state).await?,
 
         // ── Service Commands ──
-        Command::Service { action } => handle_service(action, &state, &runtime, &data_dir, podman_ok).await?,
+        Command::Service { action } => handle_service(action, &state, &runtime, &data_dir, podman_ok, &cluster_state).await?,
 
         // ── Node Commands (Fase 2) ──
         Command::Node { action } => handle_node(action, &state, &cluster_state).await?,
@@ -500,9 +500,10 @@ async fn handle_service(
     runtime: &PodmanRuntime,
     _data_dir: &Path,
     podman_ok: bool,
+    cluster_state: &Option<sparrow_api::SharedAppState>,
 ) -> anyhow::Result<()> {
     match action {
-        ServiceAction::Create { name, image, replicas, port, env, volume: _, network: _, restart: _, domain: _, autoscale: _ } => {
+        ServiceAction::Create { name, image, replicas, port, env, volume: _, network: _, restart: _, domain, autoscale: _ } => {
             if !podman_ok {
                 error!("❌ Podman not available (verify Podman is installed)");
                 std::process::exit(1);
@@ -554,6 +555,7 @@ async fn handle_service(
             let mut success = 0u32;
             let ports_base = spec.ports.clone();
             let env_base = spec.env.clone();
+            let mut container_ips: Vec<String> = Vec::new();
             for i in 1..=replicas {
                 let container_name = format!("{}-{}", name, i);
                 let port_refs: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
@@ -562,15 +564,26 @@ async fn handle_service(
 
                 match runtime.run_container(&container_name, &image, &port_refs, &env_refs, &labels).await {
                     Ok(cid) => {
-                        state.record_container_with_ip(&container_name, &spec.id, &image, i, "Running")?;
-                        println!("  ✅ {container_name} -> {cid:.12}");
+                        let ip = runtime.inspect_ip(&container_name).await.unwrap_or_default();
+                        state.record_container(&container_name, &spec.id, &image, i, "Running", &ip)?;
+                        println!("  ✅ {container_name} -> {cid:.12} ({})", ip);
+                        if !ip.is_empty() { container_ips.push(ip); }
                         success += 1;
                     }
                     Err(e) => {
-                        state.record_container_with_ip(&container_name, &spec.id, &image, i, "Failed")?;
+                        state.record_container(&container_name, &spec.id, &image, i, "Failed", "")?;
                         eprintln!("  ❌ {container_name}: {e}");
                     }
                 }
+            }
+
+            if let (Some(state_ref), Some(domain_val)) = (cluster_state.as_ref(), &domain) {
+                let target_port = ports_base.first().map(|p| p.target).unwrap_or(80);
+                state_ref.register_route(domain_val, &name, target_port, false).await;
+                for ip in &container_ips {
+                    state_ref.add_container_ip(&name, ip).await;
+                }
+                println!("  🌐 Proxy route '{domain_val}' → {name}:{target_port} ({})", container_ips.len());
             }
 
             println!("🎯 Service '{name}' created with {success}/{replicas} replicas");

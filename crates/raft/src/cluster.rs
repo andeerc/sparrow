@@ -70,6 +70,17 @@ impl RaftCluster {
         // Ensure data_dir exists
         std::fs::create_dir_all(&self.data_dir)?;
 
+        // Clean up stale Raft databases from previous failed init attempts.
+        // openraft's initialize() requires vote == None, but a prior failed
+        // init leaves a committed vote in the DB, blocking subsequent attempts.
+        for suffix in ["log", "sm"] {
+            let p = self.raft_db_path(suffix);
+            let path = std::path::Path::new(&p);
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+        }
+
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
         let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"))?;
         let network = NetworkFactory {

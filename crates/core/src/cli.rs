@@ -52,13 +52,17 @@ pub enum Command {
 
     /// MCP server mode
     Mcp {
-        /// Port to listen on
+        /// Port to listen on (SSE mode)
         #[arg(long, default_value = "3000")]
         port: u16,
 
-        /// Host to bind
+        /// Host to bind (SSE mode)
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+
+        /// Use stdio transport instead of SSE (for OpenCode command mode)
+        #[arg(long)]
+        stdio: bool,
     },
 
     /// Deploy from YAML file
@@ -655,9 +659,10 @@ mod tests {
     #[test]
     fn test_parse_mcp_defaults() {
         let cmd = parse(&["sparrow", "mcp"]);
-        if let Command::Mcp { port, host } = &cmd {
+        if let Command::Mcp { port, host, stdio } = &cmd {
             assert_eq!(*port, 3000);
             assert_eq!(host, "127.0.0.1");
+            assert!(!stdio);
         } else {
             panic!();
         }
@@ -666,7 +671,12 @@ mod tests {
     #[test]
     fn test_parse_mcp_custom() {
         let cmd = parse(&["sparrow", "mcp", "--port", "8080", "--host", "0.0.0.0"]);
-        if let Command::Mcp { port, host } = &cmd {
+        if let Command::Mcp {
+            port,
+            host,
+            stdio: _,
+        } = &cmd
+        {
             assert_eq!(*port, 8080);
             assert_eq!(host, "0.0.0.0");
         } else {

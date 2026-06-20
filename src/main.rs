@@ -16,7 +16,6 @@ use sparrow_core::cli::{
 };
 use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
-use sparrow_mcp::start_mcp;
 use sparrow_podman::PodmanRuntime;
 use sparrow_proto::*;
 
@@ -190,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         // ── Alert Commands (Fase 4) ──
         Command::Alert { action } => handle_alert(action, &state).await?,
 
-        Command::Mcp { port, host } => {
+        Command::Mcp { port, host, stdio } => {
             let cluster_name = &config.cluster.name;
             let app_state = cluster_state.clone().unwrap_or_else(|| {
                 init_cluster_with_vault(
@@ -202,20 +201,26 @@ async fn main() -> anyhow::Result<()> {
                     vault_key.clone(),
                 )
             });
-            // Resolve hostname to IP (SocketAddr doesn't accept hostnames)
-            let addr = if host == "localhost" {
-                format!("127.0.0.1:{port}")
+
+            if stdio {
+                eprintln!("🔌 Starting MCP server (stdio mode)...");
+                sparrow_mcp::start_mcp_stdio(app_state, state.clone(), runtime.clone()).await;
             } else {
-                match tokio::net::lookup_host((host.as_str(), port)).await {
-                    Ok(mut addrs) => addrs
-                        .next()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|| format!("127.0.0.1:{port}")),
-                    Err(_) => format!("127.0.0.1:{port}"),
-                }
-            };
-            println!("🔌 Starting MCP server on {addr}...");
-            start_mcp(app_state, state.clone(), runtime.clone(), &addr).await?;
+                // Resolve hostname to IP (SocketAddr doesn't accept hostnames)
+                let addr = if host == "localhost" {
+                    format!("127.0.0.1:{port}")
+                } else {
+                    match tokio::net::lookup_host((host.as_str(), port)).await {
+                        Ok(mut addrs) => addrs
+                            .next()
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|| format!("127.0.0.1:{port}")),
+                        Err(_) => format!("127.0.0.1:{port}"),
+                    }
+                };
+                println!("🔌 Starting MCP server on {addr}...");
+                sparrow_mcp::start_mcp(app_state, state.clone(), runtime.clone(), &addr).await?;
+            }
         }
 
         // ── Deploy (Fase 3) ──

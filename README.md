@@ -28,6 +28,7 @@ Swarm (morto)                    K8s (complexo)
 | Networking | Podman network proxy + hyper reverse proxy |
 | Frontend | Dashboard SPA (HTML/CSS/JS embutido) |
 | Alertas | Telegram Bot API + SMTP (lettre) |
+| Criptografia | AES-256-GCM (vault de secrets) |
 
 ## Estrutura do Projeto
 
@@ -37,7 +38,7 @@ sparrow/
 ├── src/main.rs             # CLI entrypoint + handlers + health check + autoscale
 ├── crates/
 │   ├── proto/              # Tipos compartilhados (ServiceSpec, ContainerStatus, NodeSpec, etc.)
-│   ├── core/               # CLI, config, error, state store (SQLite), deploy YAML, autoscale, alerts
+│   ├── core/               # CLI, config, error, state store (SQLite), deploy YAML, autoscale, alerts, vault, crypto
 │   ├── podman/             # Podman runtime wrapper (run, rm, logs, inspect, stats)
 │   ├── raft/               # Raft consensus (openraft) — NodeId, storage, network, cluster init/join
 │   ├── api/                # API HTTP (axum) — cluster, nodes, proxy routes, autoscale, alerts, dashboard
@@ -56,10 +57,12 @@ sparrow/
 | **Autoscale** | Auto-scaling por CPU/memória com cooldown, pause/resume |
 | **Rede** | Proxy reverso por domínio (porta 7444) |
 | **Alertas** | Telegram Bot API + Email SMTP |
-| **MCP** | Servidor SSE + JSON-RPC (5 tools, 2 resources) |
+| **MCP** | Servidor SSE + JSON-RPC (8 tools, 2 resources) |
+| **Vault** | `sparrow secret set/get/list/rm` — AES-256-GCM, chave mestra em arquivo ou env var |
 | **Dashboard** | SPA dark theme embutido na porta 7443 |
 | **Update** | `sparrow update check` e `sparrow update install` via Codeberg |
 | **Saúde** | Health check loop (restarta containers falhos, escala se necessário) |
+| **Monitoramento** | Métricas Prometheus em `/metrics`, health check endpoints |
 
 ## CLI Reference
 
@@ -109,6 +112,13 @@ sparrow mcp
 sparrow update check
 sparrow update install
 
+# Secrets Vault (AES-256-GCM)
+sparrow secret init                     # gerar chave mestra
+sparrow secret set myapp/DB_PWD "s3cr3t" # armazenar cifrado
+sparrow secret get myapp/DB_PWD          # descriptografar
+sparrow secret list                      # listar nomes (nunca decripta)
+sparrow secret rm myapp/DB_PWD           # remover
+
 # Status
 sparrow status
 ```
@@ -129,6 +139,10 @@ DELETE /api/v1/autoscale/{service_id}
 GET    /api/v1/alerts/channels
 POST   /api/v1/alerts/channels
 GET    /api/v1/alerts/events
+GET    /api/v1/secrets                   # listar secrets
+GET    /api/v1/secrets/{name}            # obter secret (decriptado)
+POST   /api/v1/secrets/{name}            # criar/atualizar secret
+DELETE /api/v1/secrets/{name}            # remover secret
 GET    /                       # Dashboard SPA
 ```
 
@@ -139,7 +153,7 @@ Proxy HTTP baseado em domínio. Rotas configuradas via API em `/api/v1/proxy/rou
 ### MCP (porta 7445)
 
 Conexão SSE em `/sse`, mensagens JSON-RPC em `/messages`.
-- Tools: list_services, get_service, list_nodes, scale_service, cluster_status
+- Tools: list_services, get_service, list_nodes, scale_service, cluster_status, service_logs, deploy_service, remove_service, get_secret
 - Resources: sparrow://status, sparrow://logs/{service}
 
 ## Config
@@ -254,6 +268,11 @@ EOF
 
 # Remove
 ./target/release/sparrow service rm hello
+
+# Secrets Vault
+./target/release/sparrow secret init
+./target/release/sparrow secret set staging/PASSWORD "minha-senha"
+./target/release/sparrow secret get staging/PASSWORD
 ```
 
 ## Roadmap

@@ -99,6 +99,7 @@ pub struct AppState {
     pub state_store: Option<Arc<StateStore>>,
     pub rate_limiter: RwLock<HashMap<String, (Instant, u64)>>,
     pub auth_token: Option<String>,
+    pub vault_key: RwLock<Option<String>>,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -232,6 +233,10 @@ pub async fn start_api(
         .route("/raft/vote", post(raft_vote))
         .route("/raft/snapshot", post(raft_snapshot))
         .route("/raft/add_learner", post(raft_add_learner))
+        .route("/api/v1/secrets", get(secret_list))
+        .route("/api/v1/secrets/{name}", get(secret_get))
+        .route("/api/v1/secrets/{name}", post(secret_set))
+        .route("/api/v1/secrets/{name}", delete(secret_delete))
         .merge(dashboard::routes())
         .fallback(proxy::handle_proxy)
         .layer(middleware::from_fn_with_state(
@@ -627,6 +632,17 @@ pub fn init_cluster_with_auth(
     raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
     auth_token: Option<String>,
 ) -> SharedAppState {
+    init_cluster_with_vault(name, node_name, addr, raft_cluster, auth_token, None)
+}
+
+pub fn init_cluster_with_vault(
+    name: &str,
+    node_name: &str,
+    addr: &str,
+    raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
+    auth_token: Option<String>,
+    vault_key: Option<String>,
+) -> SharedAppState {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -661,7 +677,88 @@ pub fn init_cluster_with_auth(
         state_store: None,
         rate_limiter: RwLock::new(HashMap::new()),
         auth_token,
+        vault_key: RwLock::new(vault_key),
     })
+}
+
+// ── Secret Handlers ──
+
+/// List all secret names.
+async fn secret_list(
+    State(state): State<SharedAppState>,
+) -> Result<Json<Vec<String>>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    store.list_secrets().map(Json).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list secrets: {e}"))
+    })
+}
+
+/// Get a decrypted secret value.
+async fn secret_get(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let vault_key = state.vault_key.read().await;
+    let key = vault_key.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Vault not initialized".to_string())
+    })?;
+    let encrypted = store.get_secret(&name).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read secret: {e}"))
+    })?.ok_or_else(|| {
+        (StatusCode::NOT_FOUND, format!("Secret '{name}' not found"))
+    })?;
+    let decrypted = sparrow_core::crypto::decrypt(&encrypted, key).ok_or_else(|| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to decrypt secret".to_string())
+    })?;
+    Ok(decrypted)
+}
+
+/// Set (create or update) a secret.
+#[derive(Deserialize)]
+struct SetSecretRequest {
+    value: String,
+}
+
+async fn secret_set(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(body): Json<SetSecretRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let vault_key = state.vault_key.read().await;
+    let key = vault_key.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Vault not initialized".to_string())
+    })?;
+    let encrypted = sparrow_core::crypto::encrypt(&body.value, key);
+    store.set_secret(&name, &encrypted).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store secret: {e}"))
+    })?;
+    Ok(Json(serde_json::json!({"status": "stored", "name": name})))
+}
+
+/// Delete a secret.
+async fn secret_delete(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+    })?;
+    let removed = store.delete_secret(&name).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete secret: {e}"))
+    })?;
+    if removed {
+        Ok(Json(serde_json::json!({"status": "removed", "name": name})))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("Secret '{name}' not found")))
+    }
 }
 
 // ── Service CRUD Handlers ──

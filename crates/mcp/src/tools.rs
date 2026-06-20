@@ -1,4 +1,5 @@
 use sparrow_api::SharedAppState;
+use sparrow_core::crypto;
 use sparrow_core::state::StateStore;
 use sparrow_podman::PodmanRuntime;
 use sparrow_proto::ServiceSpec;
@@ -19,6 +20,7 @@ pub async fn handle_tool_call(
         "service_logs" => service_logs(params, podman).await,
         "deploy_service" => deploy_service(params, store).await,
         "remove_service" => remove_service(params, store, podman).await,
+        "get_secret" => get_secret(params, store, app).await,
         _ => result_error(&format!("Unknown tool: {tool}")),
     }
 }
@@ -182,6 +184,32 @@ async fn cluster_status(store: &StateStore, app: &SharedAppState) -> serde_json:
         "services": services_count,
         "version": "0.1.0",
     }))
+}
+
+async fn get_secret(
+    params: &serde_json::Value,
+    store: &StateStore,
+    app: &SharedAppState,
+) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return result_error("Missing required parameter: name");
+    }
+    let encrypted = match store.get_secret(name) {
+        Ok(Some(v)) => v,
+        Ok(None) => return result_error(&format!("Secret '{name}' not found")),
+        Err(e) => return result_error(&format!("Failed to read secret: {e}")),
+    };
+    let vault_key = app.vault_key.read().await;
+    let key = match vault_key.as_ref() {
+        Some(k) => k.clone(),
+        None => return result_error("Vault not initialized"),
+    };
+    drop(vault_key);
+    match crypto::decrypt(&encrypted, &key) {
+        Some(value) => result_ok(&serde_json::json!({"name": name, "value": value})),
+        None => result_error("Failed to decrypt secret"),
+    }
 }
 
 fn result_ok(data: &serde_json::Value) -> serde_json::Value {

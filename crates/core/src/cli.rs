@@ -93,6 +93,12 @@ pub enum Command {
         shell: String,
     },
 
+    /// Manage secrets vault
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
+    },
+
     /// Show cluster status
     Status,
 }
@@ -103,6 +109,31 @@ pub enum UpdateAction {
     Check,
     /// Download and install the latest version
     Install,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretAction {
+    /// Initialize vault key
+    Init,
+    /// Set a secret value (encrypts and stores)
+    Set {
+        /// Secret name (e.g. "myapp/DB_PASSWORD")
+        name: String,
+        /// Secret value
+        value: String,
+    },
+    /// Get a decrypted secret value
+    Get {
+        /// Secret name
+        name: String,
+    },
+    /// List all secret names
+    List,
+    /// Remove a secret
+    Rm {
+        /// Secret name
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

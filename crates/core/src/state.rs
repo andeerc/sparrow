@@ -194,6 +194,22 @@ impl StateStore {
             )?;
         }
 
+        // Migration v6: add secrets vault
+        let has_secrets = conn
+            .prepare("SELECT name FROM secrets LIMIT 1")
+            .is_ok();
+        if !has_secrets {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS secrets (
+                    name            TEXT PRIMARY KEY,
+                    encrypted_value TEXT NOT NULL,
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO schema_version (version) VALUES (6);",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -769,6 +785,53 @@ impl StateStore {
             .filter_map(|r| r.ok())
             .collect();
         Ok(channels)
+    }
+
+    // ── Secrets Vault ──
+
+    /// Store an encrypted secret value (upsert).
+    pub fn set_secret(&self, name: &str, encrypted_value: &str) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO secrets (name, encrypted_value, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(name) DO UPDATE SET encrypted_value = ?2, updated_at = ?4",
+            params![name, encrypted_value, Utc::now().to_rfc3339(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve encrypted secret by name.
+    pub fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT encrypted_value FROM secrets WHERE name = ?1",
+        )?;
+        let result = stmt
+            .query_map(params![name], |row| row.get::<_, String>(0))?
+            .next()
+            .transpose()?;
+        Ok(result)
+    }
+
+    /// List all secret names (never decrypts).
+    pub fn list_secrets(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT name FROM secrets ORDER BY name",
+        )?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(names)
+    }
+
+    /// Delete a secret by name. Returns true if existed.
+    pub fn delete_secret(&self, name: &str) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let affected = conn.execute("DELETE FROM secrets WHERE name = ?1", params![name])?;
+        Ok(affected > 0)
     }
 }
 

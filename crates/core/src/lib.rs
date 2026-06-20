@@ -18,8 +18,7 @@ pub mod crypto;
 pub mod deploy;
 pub mod error;
 pub mod state;
-
-pub use cli::*;
+pub mod vault;
 pub use config::*;
 pub use deploy::*;
 pub use error::*;

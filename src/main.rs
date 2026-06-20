@@ -8,11 +8,11 @@ use tokio::time::{sleep, Duration};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-use sparrow_api::init_cluster;
+use sparrow_api::init_cluster_with_vault;
 use sparrow_core::autoscale::AutoscaleEngine;
 use sparrow_core::cli::{
     AlertAction, AutoscaleAction, Cli, ClusterAction, Command, ConfigAction, NetworkAction,
-    NodeAction, ServiceAction, UpdateAction,
+    NodeAction, SecretAction, ServiceAction, UpdateAction,
 };
 use sparrow_core::config::SparrowConfig;
 use sparrow_core::state::StateStore;
@@ -141,6 +141,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cluster_state: Option<sparrow_api::SharedAppState> = None;
 
+    // Try to load vault key for secrets API
+    let vault_key = match sparrow_core::vault::Vault::open(&data_dir) {
+        Ok(v) => Some(v.seed().to_string()),
+        Err(_) => None,
+    };
+
     if let Command::Config { action } = &cli.command {
         handle_config(action, &config_path).await?;
         return Ok(());
@@ -148,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Cluster { action } => {
-            handle_cluster(action, &state, &config, &data_dir, &mut cluster_state).await?
+            handle_cluster(action, &state, &config, &data_dir, &mut cluster_state, vault_key.clone()).await?
         }
 
         // ── Service Commands ──
@@ -179,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Mcp { port, host } => {
             let cluster_name = &config.cluster.name;
             let app_state = cluster_state.clone().unwrap_or_else(|| {
-                init_cluster(cluster_name, "localhost", &format!("{host}:{port}"), None)
+                init_cluster_with_vault(cluster_name, "localhost", &format!("{host}:{port}"), None, None, vault_key.clone())
             });
             // Resolve hostname to IP (SocketAddr doesn't accept hostnames)
             let addr = if host == "localhost" {
@@ -351,6 +357,57 @@ async fn main() -> anyhow::Result<()> {
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut std::io::stdout());
         }
+
+        // ── Secrets Vault ──
+        Command::Secret { action } => {
+            use sparrow_core::vault::Vault;
+
+            let vault = match &action {
+                // Init creates a new vault key regardless
+                SecretAction::Init => {
+                    Vault::init(&data_dir)?;
+                    return Ok(());
+                }
+                _ => Vault::open(&data_dir)?,
+            };
+
+            match action {
+                SecretAction::Init => unreachable!(), // handled above
+                SecretAction::Set { name, value } => {
+                    let encrypted = vault.encrypt(&value);
+                    state.set_secret(&name, &encrypted)?;
+                    println!("🔐 Secret '{name}' stored");
+                }
+                SecretAction::Get { name } => {
+                    let encrypted = state.get_secret(&name)?;
+                    match encrypted {
+                        Some(enc) => match vault.decrypt(&enc) {
+                            Some(val) => println!("{}", val),
+                            None => eprintln!("❌ Failed to decrypt secret '{name}'"),
+                        },
+                        None => eprintln!("❌ Secret '{name}' not found"),
+                    }
+                }
+                SecretAction::List => {
+                    let names = state.list_secrets()?;
+                    if names.is_empty() {
+                        println!("📭 No secrets stored");
+                    } else {
+                        println!("🔐 Secrets:");
+                        for name in names {
+                            println!("  • {name}");
+                        }
+                    }
+                }
+                SecretAction::Rm { name } => {
+                    if state.delete_secret(&name)? {
+                        println!("🗑️ Secret '{name}' removed");
+                    } else {
+                        eprintln!("❌ Secret '{name}' not found");
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -504,6 +561,7 @@ async fn handle_cluster(
     config: &SparrowConfig,
     data_dir: &Path,
     cluster_state: &mut Option<sparrow_api::SharedAppState>,
+    vault_key: Option<String>,
 ) -> anyhow::Result<()> {
     let raft_data_dir = data_dir.display().to_string();
     match action {
@@ -537,12 +595,13 @@ async fn handle_cluster(
             };
             raft_cluster.init().await?;
 
-            let app_state = sparrow_api::init_cluster_with_auth(
+            let app_state = sparrow_api::init_cluster_with_vault(
                 &name,
                 "localhost",
                 addr,
                 Some(raft_cluster),
                 config.api.auth_token.clone(),
+                vault_key.clone(),
             );
             let cs_clone = app_state.clone();
             let listen_addr = addr.to_string();
@@ -591,11 +650,13 @@ async fn handle_cluster(
                 &raft_data_dir,
             ));
             raft_cluster.join(&addr).await?;
-            let app_state = sparrow_api::init_cluster(
+            let app_state = sparrow_api::init_cluster_with_vault(
                 "default",
                 "localhost",
                 "0.0.0.0:7443",
                 Some(raft_cluster),
+                None,
+                vault_key.clone(),
             );
             *cluster_state = Some(app_state);
             println!("✅ Joined cluster at {addr}");

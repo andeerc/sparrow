@@ -200,6 +200,17 @@ async fn messages_handler(
                                 "type": "object",
                                 "properties": {}
                             }
+                        },
+                        {
+                            "name": "get_secret",
+                            "description": "Get a decrypted secret value by name",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"}
+                                },
+                                "required": ["name"]
+                            }
                         }
                     ]
                 }

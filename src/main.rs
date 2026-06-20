@@ -154,7 +154,15 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Cluster { action } => {
-            handle_cluster(action, &state, &config, &data_dir, &mut cluster_state, vault_key.clone()).await?
+            handle_cluster(
+                action,
+                &state,
+                &config,
+                &data_dir,
+                &mut cluster_state,
+                vault_key.clone(),
+            )
+            .await?
         }
 
         // ── Service Commands ──
@@ -185,7 +193,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Mcp { port, host } => {
             let cluster_name = &config.cluster.name;
             let app_state = cluster_state.clone().unwrap_or_else(|| {
-                init_cluster_with_vault(cluster_name, "localhost", &format!("{host}:{port}"), None, None, vault_key.clone())
+                init_cluster_with_vault(
+                    cluster_name,
+                    "localhost",
+                    &format!("{host}:{port}"),
+                    None,
+                    None,
+                    vault_key.clone(),
+                )
             });
             // Resolve hostname to IP (SocketAddr doesn't accept hostnames)
             let addr = if host == "localhost" {

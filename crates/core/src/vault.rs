@@ -1,6 +1,6 @@
-use std::path::Path;
-use std::fs;
 use rand::Rng;
+use std::fs;
+use std::path::Path;
 
 use crate::crypto;
 
@@ -35,7 +35,9 @@ impl Vault {
 
     /// Init vault — generates a random key and writes to vault.key.
     pub fn init(config_dir: &Path) -> Result<Self, anyhow::Error> {
-        let seed: String = (0..32).map(|_| format!("{:02x}", rand::thread_rng().gen::<u8>())).collect();
+        let seed: String = (0..32)
+            .map(|_| format!("{:02x}", rand::thread_rng().gen::<u8>()))
+            .collect();
         fs::create_dir_all(config_dir)?;
         let key_path = config_dir.join("vault.key");
         fs::write(&key_path, &seed)?;

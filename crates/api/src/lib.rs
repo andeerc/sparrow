@@ -688,10 +688,16 @@ async fn secret_list(
     State(state): State<SharedAppState>,
 ) -> Result<Json<Vec<String>>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     store.list_secrets().map(Json).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list secrets: {e}"))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to list secrets: {e}"),
+        )
     })
 }
 
@@ -701,19 +707,32 @@ async fn secret_get(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<String, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     let vault_key = state.vault_key.read().await;
     let key = vault_key.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "Vault not initialized".to_string())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Vault not initialized".to_string(),
+        )
     })?;
-    let encrypted = store.get_secret(&name).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read secret: {e}"))
-    })?.ok_or_else(|| {
-        (StatusCode::NOT_FOUND, format!("Secret '{name}' not found"))
-    })?;
+    let encrypted = store
+        .get_secret(&name)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read secret: {e}"),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Secret '{name}' not found")))?;
     let decrypted = sparrow_core::crypto::decrypt(&encrypted, key).ok_or_else(|| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to decrypt secret".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to decrypt secret".to_string(),
+        )
     })?;
     Ok(decrypted)
 }
@@ -730,15 +749,24 @@ async fn secret_set(
     Json(body): Json<SetSecretRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     let vault_key = state.vault_key.read().await;
     let key = vault_key.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "Vault not initialized".to_string())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Vault not initialized".to_string(),
+        )
     })?;
     let encrypted = sparrow_core::crypto::encrypt(&body.value, key);
     store.set_secret(&name, &encrypted).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to store secret: {e}"))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to store secret: {e}"),
+        )
     })?;
     Ok(Json(serde_json::json!({"status": "stored", "name": name})))
 }
@@ -749,10 +777,16 @@ async fn secret_delete(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let store = state.state_store.as_ref().ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, "State store not available".to_string())
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "State store not available".to_string(),
+        )
     })?;
     let removed = store.delete_secret(&name).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete secret: {e}"))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to delete secret: {e}"),
+        )
     })?;
     if removed {
         Ok(Json(serde_json::json!({"status": "removed", "name": name})))

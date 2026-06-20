@@ -195,9 +195,7 @@ impl StateStore {
         }
 
         // Migration v6: add secrets vault
-        let has_secrets = conn
-            .prepare("SELECT name FROM secrets LIMIT 1")
-            .is_ok();
+        let has_secrets = conn.prepare("SELECT name FROM secrets LIMIT 1").is_ok();
         if !has_secrets {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS secrets (
@@ -796,7 +794,12 @@ impl StateStore {
             "INSERT INTO secrets (name, encrypted_value, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(name) DO UPDATE SET encrypted_value = ?2, updated_at = ?4",
-            params![name, encrypted_value, Utc::now().to_rfc3339(), Utc::now().to_rfc3339()],
+            params![
+                name,
+                encrypted_value,
+                Utc::now().to_rfc3339(),
+                Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -804,9 +807,7 @@ impl StateStore {
     /// Retrieve encrypted secret by name.
     pub fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT encrypted_value FROM secrets WHERE name = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT encrypted_value FROM secrets WHERE name = ?1")?;
         let result = stmt
             .query_map(params![name], |row| row.get::<_, String>(0))?
             .next()
@@ -817,9 +818,7 @@ impl StateStore {
     /// List all secret names (never decrypts).
     pub fn list_secrets(&self) -> anyhow::Result<Vec<String>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT name FROM secrets ORDER BY name",
-        )?;
+        let mut stmt = conn.prepare("SELECT name FROM secrets ORDER BY name")?;
         let names = stmt
             .query_map([], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())

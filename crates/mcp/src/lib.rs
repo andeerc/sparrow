@@ -180,7 +180,7 @@ async fn messages_handler(
 }
 
 /// Process a JSON-RPC message and return the response (sync, no HTTP binding).
-fn handle_jsonrpc(body: &serde_json::Value, state: &InternalState) -> serde_json::Value {
+fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_json::Value {
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let is_notification = body.get("id").is_none();
 

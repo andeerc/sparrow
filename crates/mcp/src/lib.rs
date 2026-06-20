@@ -135,11 +135,47 @@ async fn messages_handler(
     State(state): State<Arc<InternalState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let response = handle_jsonrpc(&body, &state);
+    let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
 
-    // Broadcast to SSE subscribers
+    let response = match method {
+        "tools/call" => {
+            let tool = body["params"]["name"].as_str().unwrap_or("");
+            let params = match body["params"]["arguments"].clone() {
+                serde_json::Value::Null => serde_json::json!({}),
+                v => v,
+            };
+            let result = tools::handle_tool_call(
+                tool,
+                &params,
+                &state.state_store,
+                &state.app_state,
+                &state.podman,
+            )
+            .await;
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+        }
+        "resources/read" => {
+            let uri = body
+                .get("params")
+                .and_then(|p| p.get("uri"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            match resources::handle_resource_read(uri, Some(&state.podman), &state.app_state).await
+            {
+                Ok(content) => {
+                    let entry = content.into_content_entry(uri);
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"contents": [entry]}})
+                }
+                Err(err) => {
+                    serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": err}})
+                }
+            }
+        }
+        _ => handle_jsonrpc(&body, &state),
+    };
+
     let _ = state.tx.send(response.to_string());
-
     Ok(Json(response))
 }
 
@@ -163,7 +199,7 @@ fn handle_jsonrpc(body: &serde_json::Value, state: &InternalState) -> serde_json
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": "0.1.0",
+                    "protocolVersion": "2024-11-05",
                     "capabilities": {
                         "tools": {},
                         "resources": {}
@@ -203,6 +239,11 @@ fn handle_jsonrpc(body: &serde_json::Value, state: &InternalState) -> serde_json
                         "name": "cluster_status",
                         "description": "Get overall cluster health",
                         "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "get_secret",
+                        "description": "Get a decrypted secret value by name",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"} }, "required": ["name"] }
                     }
                 ]
             });
@@ -210,29 +251,6 @@ fn handle_jsonrpc(body: &serde_json::Value, state: &InternalState) -> serde_json
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": tools_json
-            })
-        }
-        "tools/call" => {
-            let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
-            let tool = body["params"]["name"].as_str().unwrap_or("");
-            let params = match body["params"]["arguments"].clone() {
-                serde_json::Value::Null => serde_json::json!({}),
-                v => v,
-            };
-            let result = tokio::runtime::Handle::current().block_on(async {
-                tools::handle_tool_call(
-                    tool,
-                    &params,
-                    &state.state_store,
-                    &state.app_state,
-                    &state.podman,
-                )
-                .await
-            });
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result
             })
         }
         "resources/list" => {
@@ -258,33 +276,6 @@ fn handle_jsonrpc(body: &serde_json::Value, state: &InternalState) -> serde_json
                 }
             })
         }
-        "resources/read" => {
-            let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
-            let uri = body
-                .get("params")
-                .and_then(|p| p.get("uri"))
-                .and_then(|u| u.as_str())
-                .unwrap_or("");
-            match tokio::runtime::Handle::current().block_on(resources::handle_resource_read(
-                uri,
-                Some(&state.podman),
-                &state.app_state,
-            )) {
-                Ok(content) => {
-                    let entry = content.into_content_entry(uri);
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": { "contents": [entry] }
-                    })
-                }
-                Err(err) => serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32602, "message": err }
-                }),
-            }
-        }
         _ => {
             if is_notification {
                 serde_json::json!({"jsonrpc": "2.0"})
@@ -309,6 +300,7 @@ pub async fn start_mcp_stdio(
     podman: std::sync::Arc<sparrow_podman::PodmanRuntime>,
 ) {
     use std::io::{BufRead, Write};
+    use tokio::runtime::Handle;
 
     let internal = Arc::new(InternalState {
         app_state: state,
@@ -326,7 +318,48 @@ pub async fn start_mcp_stdio(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let response = handle_jsonrpc(&body, &internal);
+                let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+                let response = match method {
+                    "tools/call" => {
+                        let tool = body["params"]["name"].as_str().unwrap_or("");
+                        let params = match body["params"]["arguments"].clone() {
+                            serde_json::Value::Null => serde_json::json!({}),
+                            v => v,
+                        };
+                        let result = Handle::current().block_on(tools::handle_tool_call(
+                            tool,
+                            &params,
+                            &internal.state_store,
+                            &internal.app_state,
+                            &internal.podman,
+                        ));
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
+                    }
+                    "resources/read" => {
+                        let uri = body
+                            .get("params")
+                            .and_then(|p| p.get("uri"))
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("");
+                        let result = Handle::current().block_on(resources::handle_resource_read(
+                            uri,
+                            Some(&internal.podman),
+                            &internal.app_state,
+                        ));
+                        match result {
+                            Ok(content) => {
+                                let entry = content.into_content_entry(uri);
+                                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"contents": [entry]}})
+                            }
+                            Err(err) => {
+                                serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": err}})
+                            }
+                        }
+                    }
+                    _ => handle_jsonrpc(&body, &internal),
+                };
                 println!("{}", serde_json::to_string(&response).unwrap_or_default());
                 let _ = std::io::stdout().lock().flush();
             }

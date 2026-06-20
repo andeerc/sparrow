@@ -206,7 +206,7 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                     },
                     "serverInfo": {
                         "name": "sparrow",
-                        "version": "0.9.4"
+                        "version": "0.9.6"
                     }
                 }
             })

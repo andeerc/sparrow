@@ -244,6 +244,41 @@ fn handle_jsonrpc(body: &serde_json::Value, state: &InternalState) -> serde_json
                         "name": "get_secret",
                         "description": "Get a decrypted secret value by name",
                         "inputSchema": { "type": "object", "properties": { "name": {"type": "string"} }, "required": ["name"] }
+                    },
+                    {
+                        "name": "list_secrets",
+                        "description": "List all secret names",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "set_secret",
+                        "description": "Store an encrypted secret",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "value": {"type": "string"} }, "required": ["name", "value"] }
+                    },
+                    {
+                        "name": "delete_secret",
+                        "description": "Remove a secret by name",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"} }, "required": ["name"] }
+                    },
+                    {
+                        "name": "service_logs",
+                        "description": "Get recent log lines from a service",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "tail": {"type": "integer"} }, "required": ["name"] }
+                    },
+                    {
+                        "name": "service_ps",
+                        "description": "List containers for a service",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"} }, "required": ["name"] }
+                    },
+                    {
+                        "name": "deploy_service",
+                        "description": "Create and run a service",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "image": {"type": "string"}, "replicas": {"type": "integer"} }, "required": ["name", "image"] }
+                    },
+                    {
+                        "name": "remove_service",
+                        "description": "Remove a service and its containers",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"} }, "required": ["name"] }
                     }
                 ]
             });

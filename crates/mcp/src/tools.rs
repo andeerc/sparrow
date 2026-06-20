@@ -21,6 +21,10 @@ pub async fn handle_tool_call(
         "deploy_service" => deploy_service(params, store).await,
         "remove_service" => remove_service(params, store, podman).await,
         "get_secret" => get_secret(params, store, app).await,
+        "list_secrets" => list_secrets(store),
+        "set_secret" => set_secret(params, store, app).await,
+        "delete_secret" => delete_secret(params, store),
+        "service_ps" => service_ps(params, store).await,
         _ => result_error(&format!("Unknown tool: {tool}")),
     }
 }
@@ -209,6 +213,76 @@ async fn get_secret(
     match crypto::decrypt(&encrypted, &key) {
         Some(value) => result_ok(&serde_json::json!({"name": name, "value": value})),
         None => result_error("Failed to decrypt secret"),
+    }
+}
+
+fn list_secrets(store: &StateStore) -> serde_json::Value {
+    match store.list_secrets() {
+        Ok(names) => result_ok(&serde_json::json!({"secrets": names})),
+        Err(e) => result_error(&format!("Failed to list secrets: {e}")),
+    }
+}
+
+async fn set_secret(
+    params: &serde_json::Value,
+    store: &StateStore,
+    app: &SharedAppState,
+) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() || value.is_empty() {
+        return result_error("Missing required parameters: name, value");
+    }
+    let vault_key = app.vault_key.read().await;
+    let key = match vault_key.as_ref() {
+        Some(k) => k.clone(),
+        None => return result_error("Vault not initialized. Run: sparrow secret init"),
+    };
+    drop(vault_key);
+    let encrypted = crypto::encrypt(value, &key);
+    match store.set_secret(name, &encrypted) {
+        Ok(_) => result_ok(&serde_json::json!({"status": "stored", "name": name})),
+        Err(e) => result_error(&format!("Failed to store secret: {e}")),
+    }
+}
+
+fn delete_secret(params: &serde_json::Value, store: &StateStore) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return result_error("Missing required parameter: name");
+    }
+    match store.delete_secret(name) {
+        Ok(true) => result_ok(&serde_json::json!({"status": "removed", "name": name})),
+        Ok(false) => result_error(&format!("Secret '{name}' not found")),
+        Err(e) => result_error(&format!("Failed to delete secret: {e}")),
+    }
+}
+
+async fn service_ps(params: &serde_json::Value, store: &StateStore) -> serde_json::Value {
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return result_error("Missing required parameter: name");
+    }
+    let service = match store.get_service(name) {
+        Ok(Some(svc)) => svc,
+        Ok(None) => return result_error(&format!("Service '{name}' not found")),
+        Err(e) => return result_error(&format!("Failed to get service: {e}")),
+    };
+    match store.get_service_containers(&service.id) {
+        Ok(containers) => {
+            let data: Vec<serde_json::Value> = containers
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "name": c.name,
+                        "state": c.state.to_string(),
+                        "image": c.image,
+                    })
+                })
+                .collect();
+            result_ok(&serde_json::json!({"service": name, "containers": data}))
+        }
+        Err(e) => result_error(&format!("Failed to list containers: {e}")),
     }
 }
 

@@ -1,0 +1,81 @@
+name: Issue Responder
+
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened]
+
+jobs:
+  respond:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@opencode')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@opencode'))
+    runs-on: docker
+    steps:
+      - name: Checkout
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          git init -q
+          git remote add origin https://andeerc:${FORGEJO_TOKEN}@codeberg.org/andeerc/sparrow.git
+          git fetch origin --depth 1 main
+          git checkout FETCH_HEAD
+
+      - name: Install Node.js
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+
+      - name: Install OpenCode
+        run: |
+          npm install -g @opencode-ai/cli
+
+      - name: Prepare prompt
+        id: prompt
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            echo "PROMPT<<EOF" >> $GITHUB_ENV
+            echo "Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "${{ github.event.issue.body }}" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+          else
+            echo "PROMPT<<EOF" >> $GITHUB_ENV
+            echo "@opencode foi mencionado no issue #${{ github.event.issue.number }}" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "Comentário:" >> $GITHUB_ENV
+            echo "${{ github.event.comment.body }}" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "Responda como um desenvolvedor Rust senior, ajudando com código e arquitetura." >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+          fi
+
+      - name: Run OpenCode
+        id: opencode
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          echo "$PROMPT" | opencode run --agent build --model omniroute/oc/deepseek-v4-flash-free --format json > response.json 2>&1 || true
+          echo "RESPONSE=$(cat response.json | jq -r '.text // . // empty')" >> $GITHUB_ENV
+
+      - name: Post comment
+        if: env.RESPONSE != ''
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          BODY=$(cat <<'EOF'
+          ## 🤖 Resposta do @opencode
+
+          ${{ env.RESPONSE }}
+
+          ---
+          *Gerado automaticamente pelo OpenCode CI. Para evitar respostas automáticas, não mencione @opencode.*
+          EOF
+          )
+          curl -s -X POST "https://codeberg.org/api/v1/repos/andeerc/sparrow/issues/${{ env.ISSUE_NUMBER }}/comments" \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg body "$BODY" '{body: $body}')"

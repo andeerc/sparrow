@@ -15,10 +15,10 @@ jobs:
     steps:
       - name: Checkout
         env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           git init -q
-          git remote add origin https://andeerc:${FORGEJO_TOKEN}@codeberg.org/andeerc/sparrow.git
+          git remote add origin https://andeerc:${BOT_TOKEN}@codeberg.org/andeerc/sparrow.git
           git fetch origin --depth 1 main
           git checkout FETCH_HEAD
 
@@ -55,16 +55,14 @@ jobs:
 
       - name: Run OpenCode
         id: opencode
-        env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
-          echo "$PROMPT" | opencode run --agent build --model omniroute/oc/deepseek-v4-flash-free --format json > response.json 2>&1 || true
+          echo "$PROMPT" | opencode run --agent build --model opencode-go/deepseek-v4-flash --format json > response.json 2>&1 || true
           echo "RESPONSE=$(cat response.json | jq -r '.text // . // empty')" >> $GITHUB_ENV
 
       - name: Post comment
         if: env.RESPONSE != ''
         env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           BODY=$(cat <<'EOF'
           ## 🤖 Resposta do @opencode
@@ -76,6 +74,6 @@ jobs:
           EOF
           )
           curl -s -X POST "https://codeberg.org/api/v1/repos/andeerc/sparrow/issues/${{ env.ISSUE_NUMBER }}/comments" \
-            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Authorization: token ${BOT_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n --arg body "$BODY" '{body: $body}')"

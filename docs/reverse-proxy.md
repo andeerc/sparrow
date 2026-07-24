@@ -130,6 +130,22 @@ sparrow service create \
 - Renovação automática (30 dias antes de expirar)
 - HTTP-01 challenge (porta 80) ou DNS-01 challenge
 
+### Funcionamento do ACME HTTP-01 Challenge
+
+O Sparrow possui um interceptador embutido no reverse proxy para responder aos desafios de validação do Let's Encrypt de forma automática.
+
+1. **Interceptação na porta 80/HTTP:**
+   Quando a CA do Let's Encrypt acessar `http://<seu-dominio>/.well-known/acme-challenge/<token>`, o proxy integrado intercepta a chamada.
+
+2. **Resolução via Secrets Vault:**
+   O proxy interceptador carrega o valor do token a partir do segredo armazenado no banco SQLite seguro sob a chave `acme/<token>` (descriptografando na hora com a chave mestra do cluster).
+
+3. **Aprovisionamento do Desafio:**
+   Para habilitar ou renovar um certificado via ACME, basta salvar o desafio correspondente na tabela de secrets do cluster usando a CLI do Sparrow:
+   ```bash
+   sparrow secret set "acme/<token>" "<valor-da-resposta>"
+   ```
+
 ## Configuração
 
 ### Via CLI

@@ -71,7 +71,26 @@ sparrow/
 sparrow --help
 
 # Service management
-sparrow service create --name myapp --image nginx --replicas 3 --port 80:80
+# Exemplo 1: Container único com porta publicada e variáveis de ambiente
+sparrow service create \
+    --name myapp \
+    --image nginx \
+    --replicas 1 \
+    --port 80:80 \
+    --env PORT=80 \
+    --env APP_ENV=production \
+    --volume /host/data:/container/data:ro
+
+# Exemplo 2: Múltiplas réplicas usando rede interna e proxy reverso por domínio
+sparrow service create \
+    --name web \
+    --image nginx:alpine \
+    --replicas 3 \
+    --env PORT=80 \
+    --volume /srv/html:/usr/share/nginx/html \
+    --network mynet \
+    --domain app.exemplo.com
+
 sparrow service list
 sparrow service ps myapp
 sparrow service inspect myapp
@@ -149,6 +168,7 @@ GET    /                       # Dashboard SPA
 ### Reverse Proxy (porta 7444)
 
 Proxy HTTP baseado em domínio. Rotas configuradas via API em `/api/v1/proxy/routes`.
+Veja o [Guia do Reverse Proxy](docs/reverse-proxy.md) para detalhes sobre rotas dinâmicas, TLS embutido e o funcionamento do ACME HTTP-01 Challenge.
 
 ### MCP (porta 7445)
 
@@ -274,6 +294,15 @@ EOF
 ./target/release/sparrow secret set staging/PASSWORD "minha-senha"
 ./target/release/sparrow secret get staging/PASSWORD
 ```
+
+## Documentação Adicional
+
+Para ver detalhes de implementação e guias aprofundados por recurso:
+- **Arquitetura Geral:** [Visualização do Plane de Controle e componentes](docs/architecture.md)
+- **Rede Overlay & DNS:** [WireGuard e Service Discovery](docs/networking.md)
+- **Reverse Proxy & ACME:** [HTTP/2, HTTPS e Let's Encrypt automático](docs/reverse-proxy.md)
+- **Segurança & Vault:** [Criptografia de Secrets com AES-256-GCM](docs/security.md)
+- **Autoscaling:** [Métricas de CPU e Memória com Cooldown](docs/auto-scaling.md)
 
 ## Roadmap
 

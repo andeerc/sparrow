@@ -244,14 +244,115 @@
   const REFRESH_MS = 30000;
   let refreshTimer = null;
   let lastRefresh = Date.now();
+  let ws = null;
 
-  // ── Fetch helpers ──
+  // ── WebSocket connection ──
 
-  async function apiGet(path) {
-    const resp = await fetch(path);
-    if (!resp.ok) throw new Error(`${path} → ${resp.status} ${resp.statusText}`);
-    return resp.json();
+  function connectWs() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws/dashboard`;
+    ws = new WebSocket(url);
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        renderAll(data);
+        lastRefresh = Date.now();
+      } catch (e) {
+        console.error('WS parse error:', e);
+      }
+    };
+
+    ws.onclose = () => {
+      // Reconnect after 3s
+      setTimeout(connectWs, 3000);
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
   }
+
+  // ── Render from WS data (no HTTP fetch needed) ──
+
+  function renderAll(data) {
+    hideError();
+    const dot = document.getElementById('refreshDot');
+
+    try {
+      // Header
+      document.getElementById('nodeCount').textContent = data.node_count || 0;
+      document.getElementById('routeCount').textContent = (data.routes || []).length;
+      const svcs = data.services || [];
+      document.getElementById('serviceCount').textContent = svcs.length;
+      const totalReplicas = svcs.reduce((sum, s) => sum + (s.replicas || 0), 0);
+      document.getElementById('replicaCount').textContent = totalReplicas;
+
+      // Services table
+      const svcBody = document.getElementById('serviceBody');
+      if (svcs.length === 0) {
+        svcBody.innerHTML = '<tr><td colspan="7" class="empty">No services</td></tr>';
+      } else {
+        svcBody.innerHTML = svcs.map(s => {
+          const ports = (s.ports || []).map(p => `${p.published}:${p.target}`).join(', ') || '—';
+          return `<tr>
+            <td><strong>${esc(s.name)}</strong></td>
+            <td><code>${esc(s.image)}</code></td>
+            <td>${s.replicas || 0}</td>
+            <td>${esc(ports)}</td>
+            <td>${esc(s.id)}</td>
+            <td>${s.created_at ? esc(new Date(s.created_at).toLocaleString()) : '—'}</td>
+            <td>${s.updated_at ? esc(new Date(s.updated_at).toLocaleString()) : '—'}</td>
+          </tr>`;
+        }).join('');
+      }
+
+      // Nodes table
+      const nodes = data.nodes || [];
+      const nodesBody = document.getElementById('nodesBody');
+      if (nodes.length === 0) {
+        nodesBody.innerHTML = '<tr><td colspan="6" class="empty">No nodes registered</td></tr>';
+      } else {
+        nodesBody.innerHTML = nodes.map(n => `
+          <tr>
+            <td><strong>${esc(n.name)}</strong></td>
+            <td>${esc(n.addr)}</td>
+            <td>${statusBadge(n.status, n.role)}</td>
+            <td>${statusBadge(n.status)}</td>
+            <td>${n.containers || 0}</td>
+            <td style="font-size:0.8rem;color:#8b949e;">${n.last_heartbeat ? timeAgo(n.last_heartbeat) : '—'}</td>
+          </tr>
+        `).join('');
+      }
+
+      // Routes table
+      const routes = data.routes || [];
+      document.getElementById('routeCount').textContent = routes.length;
+      const routeBody = document.getElementById('routeBody');
+      if (routes.length === 0) {
+        routeBody.innerHTML = '<tr><td colspan="4" class="empty">No proxy routes</td></tr>';
+      } else {
+        routeBody.innerHTML = routes.map(r => `
+          <tr>
+            <td><strong>${esc(r.domain)}</strong></td>
+            <td>→ ${r.target_port}</td>
+            <td>${esc(r.service)}</td>
+            <td>${r.tls ? '<span class="badge badge-active">TLS</span>' : '<span class="badge badge-worker">plain</span>'}</td>
+          </tr>
+        `).join('');
+      }
+
+      document.getElementById('refreshTime').textContent = 'live';
+      dot.classList.remove('loading');
+
+    } catch (err) {
+      showError('Render error: ' + err.message);
+    }
+  }
+
+  // ── Fallback refresh (HTTP polling) ──
+
+  async function refresh() {
 
   function showError(msg) {
     const el = document.getElementById('errorBanner');
@@ -423,8 +524,17 @@
 
   // ── Init ──
 
-  await refresh();
-  startTimer();
+  // Connect WebSocket for live updates
+  connectWs();
+
+  // Keep timer as fallback (slower interval when WebSocket is active)
+  const FALLBACK_REFRESH_MS = 60000;
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => {
+    const sec = Math.floor((FALLBACK_REFRESH_MS - (Date.now() - lastRefresh)) / 1000);
+    document.getElementById('refreshTime').textContent = (ws && ws.readyState === WebSocket.OPEN) ? 'live' : Math.max(0, sec) + 's';
+    if (sec <= 0 && (!ws || ws.readyState !== WebSocket.OPEN)) refresh();
+  }, 1000);
 
 })();
 </script>

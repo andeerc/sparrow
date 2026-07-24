@@ -82,7 +82,7 @@ impl RaftCluster {
         }
 
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
-        let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"))?;
+        let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"), &self.data_dir)?;
         let network = NetworkFactory {
             tls: self.tls.clone(),
         };
@@ -120,7 +120,7 @@ impl RaftCluster {
         std::fs::create_dir_all(&self.data_dir)?;
 
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
-        let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"))?;
+        let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"), &self.data_dir)?;
         let network = NetworkFactory {
             tls: self.tls.clone(),
         };

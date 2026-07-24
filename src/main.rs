@@ -125,14 +125,15 @@ async fn main() -> anyhow::Result<()> {
     if podman_ok {
         let hc_state = Arc::clone(&state);
         let hc_runtime = Arc::clone(&runtime);
+        let hc_data_dir = data_dir.clone();
         tokio::spawn(async move {
-            health_check_loop(hc_state, hc_runtime).await;
+            health_check_loop(hc_state, hc_runtime, hc_data_dir).await;
         });
 
         // Start autoscaling engine
         let as_state = Arc::clone(&state);
         let as_runtime = Arc::clone(&runtime);
-        let engine = AutoscaleEngine::new(as_state, as_runtime);
+        let engine = AutoscaleEngine::new(as_state, as_runtime, &data_dir.display().to_string());
         tokio::spawn(async move {
             let _ = engine.start().await;
         });
@@ -199,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
                     None,
                     None,
                     vault_key.clone(),
+                    Some(Arc::clone(&state)),
                 )
             });
 
@@ -263,10 +265,8 @@ async fn main() -> anyhow::Result<()> {
                         let cname = format!("{}-{}", spec.name, i);
                         let ports: Vec<PortMapping> =
                             if i == 1 { ports_base.clone() } else { vec![] };
-                        let env_refs: Vec<(String, String)> = env_base
-                            .iter()
-                            .map(|e| (e.key.clone(), e.value.clone()))
-                            .collect();
+                        let env_refs =
+                            sparrow_core::vault::resolve_secrets(env_base, &data_dir, &state);
                         match runtime
                             .run_container(
                                 &cname,
@@ -274,6 +274,8 @@ async fn main() -> anyhow::Result<()> {
                                 &ports,
                                 &env_refs,
                                 &std::collections::HashMap::new(),
+                                &spec.volumes,
+                                &spec.networks,
                             )
                             .await
                         {
@@ -577,7 +579,7 @@ async fn handle_config(action: &ConfigAction, config_path: &Path) -> anyhow::Res
 
 async fn handle_cluster(
     action: ClusterAction,
-    _state: &StateStore,
+    state: &Arc<StateStore>,
     config: &SparrowConfig,
     data_dir: &Path,
     cluster_state: &mut Option<sparrow_api::SharedAppState>,
@@ -593,26 +595,61 @@ async fn handle_cluster(
             };
             println!("🔧 Initializing cluster '{name}' on {addr}...");
 
-            let raft_cluster = match (
+            // Generate mTLS certificates if not provided in config
+            let (ca_pem, cert_pem, key_pem) = match (
                 &config.cluster.tls_ca,
                 &config.cluster.tls_cert,
                 &config.cluster.tls_key,
             ) {
-                (Some(ca), Some(cert), Some(key)) => {
-                    let tls = sparrow_raft::TlsConfig {
-                        ca: std::fs::read(ca)?,
-                        cert: std::fs::read(cert)?,
-                        key: std::fs::read(key)?,
-                    };
-                    std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(
-                        1,
-                        addr,
-                        tls,
-                        &raft_data_dir,
-                    ))
+                (Some(ca), Some(cert), Some(key)) => (
+                    std::fs::read_to_string(ca)?,
+                    std::fs::read_to_string(cert)?,
+                    std::fs::read_to_string(key)?,
+                ),
+                _ => {
+                    let cert_dir = data_dir.join("certs");
+                    std::fs::create_dir_all(&cert_dir)?;
+                    let ca_path = cert_dir.join("ca.pem");
+                    let node_cert_path = cert_dir.join("node.pem");
+                    let node_key_path = cert_dir.join("node-key.pem");
+
+                    if ca_path.exists() && node_cert_path.exists() && node_key_path.exists() {
+                        (
+                            std::fs::read_to_string(&ca_path)?,
+                            std::fs::read_to_string(&node_cert_path)?,
+                            std::fs::read_to_string(&node_key_path)?,
+                        )
+                    } else {
+                        let (ca_pem_str, ca_key_pem, ca_cert, ca_key) =
+                            sparrow_raft::generate_ca(name.as_str())?;
+                        let bundle = sparrow_raft::generate_node_cert(
+                            &ca_cert,
+                            &ca_key,
+                            "node-1",
+                            addr,
+                            &ca_pem_str,
+                        )?;
+                        std::fs::write(&ca_path, &bundle.ca_pem)?;
+                        std::fs::write(&node_cert_path, &bundle.cert_pem)?;
+                        std::fs::write(&node_key_path, &bundle.key_pem)?;
+                        // Also save CA key for signing new node certs
+                        std::fs::write(cert_dir.join("ca-key.pem"), &ca_key_pem)?;
+                        (bundle.ca_pem, bundle.cert_pem, bundle.key_pem)
+                    }
                 }
-                _ => std::sync::Arc::new(sparrow_raft::RaftCluster::new(1, addr, &raft_data_dir)),
             };
+
+            let tls = sparrow_raft::TlsConfig {
+                ca: ca_pem.as_bytes().to_vec(),
+                cert: cert_pem.as_bytes().to_vec(),
+                key: key_pem.as_bytes().to_vec(),
+            };
+            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(
+                1,
+                addr,
+                tls,
+                &raft_data_dir,
+            ));
             raft_cluster.init().await?;
 
             let app_state = sparrow_api::init_cluster_with_vault(
@@ -622,7 +659,26 @@ async fn handle_cluster(
                 Some(raft_cluster),
                 config.api.auth_token.clone(),
                 vault_key.clone(),
+                Some(Arc::clone(state)),
             );
+
+            // Start mTLS Raft listener on raft_port
+            let raft_port = config.cluster.raft_port.unwrap_or(7444);
+            let raft_addr = format!("0.0.0.0:{raft_port}");
+            let mtls_state = app_state.clone();
+            let mtls_ca = ca_pem.clone();
+            let mtls_cert = cert_pem.clone();
+            let mtls_key = key_pem.clone();
+            let raft_handle = tokio::spawn(async move {
+                if let Err(e) = sparrow_api::start_mtls_raft_listener(
+                    mtls_state, &raft_addr, &mtls_ca, &mtls_cert, &mtls_key,
+                )
+                .await
+                {
+                    tracing::error!("Raft mTLS listener failed: {e}");
+                }
+            });
+
             let cs_clone = app_state.clone();
             let listen_addr = addr.to_string();
             let tls_cert = config.cluster.tls_cert.clone();
@@ -647,9 +703,11 @@ async fn handle_cluster(
                 }
             });
 
-            println!("✅ Cluster '{name}' initialized. API on {addr}, proxy on 7444");
+            println!(
+                "✅ Cluster '{name}' initialized. API on {addr}, proxy on 7444, Raft mTLS on {raft_port}"
+            );
             println!("   Dashboard: http://{addr}/");
-            println!("   Join token: sparrow-{}-tok-{:x}", name, name.len());
+            println!("   Certificates in {}/certs", data_dir.display());
             println!("   Press Ctrl+C to stop.");
             *cluster_state = Some(app_state);
 
@@ -657,6 +715,7 @@ async fn handle_cluster(
             tokio::select! {
                 _ = api_handle => {},
                 _ = proxy_handle => {},
+                _ = raft_handle => {},
                 _ = tokio::signal::ctrl_c() => {
                     println!("\n⏹ Shutting down...");
                 }
@@ -664,12 +723,59 @@ async fn handle_cluster(
         }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");
-            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::new(
+            let cert_dir = data_dir.join("certs");
+            std::fs::create_dir_all(&cert_dir)?;
+
+            // Load or generate mTLS certs for this node
+            let (ca_pem, cert_pem, key_pem) = {
+                let ca_path = cert_dir.join("ca.pem");
+                let node_cert_path = cert_dir.join("node.pem");
+                let node_key_path = cert_dir.join("node-key.pem");
+                let ca_key_path = cert_dir.join("ca-key.pem");
+
+                if ca_path.exists() && node_cert_path.exists() && node_key_path.exists() {
+                    (
+                        std::fs::read_to_string(&ca_path)?,
+                        std::fs::read_to_string(&node_cert_path)?,
+                        std::fs::read_to_string(&node_key_path)?,
+                    )
+                } else {
+                    // For now generate a self-signed cert; in production the join
+                    // token would carry the CA cert and a one-time secret
+                    let (ca_pem_str, ca_key_pem, ca_cert, ca_key) =
+                        sparrow_raft::generate_ca("sparrow-join")?;
+                    let node_name = format!("node-{}", token.chars().take(4).collect::<String>());
+                    let bundle = sparrow_raft::generate_node_cert(
+                        &ca_cert,
+                        &ca_key,
+                        &node_name,
+                        "0.0.0.0:7443",
+                        &ca_pem_str,
+                    )?;
+                    std::fs::write(&ca_path, &bundle.ca_pem)?;
+                    std::fs::write(&node_cert_path, &bundle.cert_pem)?;
+                    std::fs::write(&node_key_path, &bundle.key_pem)?;
+                    std::fs::write(ca_key_path, &ca_key_pem)?;
+                    (bundle.ca_pem, bundle.cert_pem, bundle.key_pem)
+                }
+            };
+
+            let tls = sparrow_raft::TlsConfig {
+                ca: ca_pem.as_bytes().to_vec(),
+                cert: cert_pem.as_bytes().to_vec(),
+                key: key_pem.as_bytes().to_vec(),
+            };
+            let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(
                 2,
                 "0.0.0.0:7443",
+                tls,
                 &raft_data_dir,
             ));
             raft_cluster.join(&addr).await?;
+
+            // Start mTLS Raft listener
+            let raft_port = config.cluster.raft_port.unwrap_or(7444);
+            let raft_addr = format!("0.0.0.0:{raft_port}");
             let app_state = sparrow_api::init_cluster_with_vault(
                 "default",
                 "localhost",
@@ -677,9 +783,29 @@ async fn handle_cluster(
                 Some(raft_cluster),
                 None,
                 vault_key.clone(),
+                Some(Arc::clone(state)),
             );
+            let mtls_state = app_state.clone();
+            let mtls_ca = ca_pem.clone();
+            let mtls_cert = cert_pem.clone();
+            let mtls_key = key_pem.clone();
+            let raft_addr_clone = raft_addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = sparrow_api::start_mtls_raft_listener(
+                    mtls_state,
+                    &raft_addr_clone,
+                    &mtls_ca,
+                    &mtls_cert,
+                    &mtls_key,
+                )
+                .await
+                {
+                    tracing::error!("Raft mTLS listener failed: {e}");
+                }
+            });
+
             *cluster_state = Some(app_state);
-            println!("✅ Joined cluster at {addr}");
+            println!("✅ Joined cluster at {addr} with mTLS on {raft_addr}");
         }
         ClusterAction::Status => match cluster_state {
             Some(cs) => {
@@ -736,7 +862,7 @@ async fn handle_service(
     action: ServiceAction,
     state: &StateStore,
     runtime: &PodmanRuntime,
-    _data_dir: &Path,
+    data_dir: &Path,
     podman_ok: bool,
     cluster_state: &Option<sparrow_api::SharedAppState>,
 ) -> anyhow::Result<()> {
@@ -748,7 +874,7 @@ async fn handle_service(
             port,
             env,
             volume,
-            network: _,
+            network,
             restart: _,
             domain,
             autoscale: _,
@@ -828,6 +954,9 @@ async fn handle_service(
             spec.ports = ports;
             spec.env = env_vars;
             spec.volumes = volumes;
+            if let Some(net) = network {
+                spec.networks = vec![net];
+            }
 
             // Persist to state store
             state.create_service(&spec)?;
@@ -841,14 +970,19 @@ async fn handle_service(
             for i in 1..=replicas {
                 let container_name = format!("{}-{}", name, i);
                 let port_refs: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
-                let env_refs: Vec<(String, String)> = env_base
-                    .iter()
-                    .map(|e| (e.key.clone(), e.value.clone()))
-                    .collect();
+                let env_refs = sparrow_core::vault::resolve_secrets(&env_base, data_dir, state);
                 let labels = std::collections::HashMap::new();
 
                 match runtime
-                    .run_container(&container_name, &image, &port_refs, &env_refs, &labels)
+                    .run_container(
+                        &container_name,
+                        &image,
+                        &port_refs,
+                        &env_refs,
+                        &labels,
+                        &spec.volumes,
+                        &spec.networks,
+                    )
                     .await
                 {
                     Ok(cid) => {
@@ -1008,10 +1142,23 @@ async fn handle_service(
                 for i in (current + 1)..=replicas {
                     let container_name = format!("{}-{}", svc.name, i);
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
+                    let env_refs: Vec<(String, String)> = svc
+                        .env
+                        .iter()
+                        .map(|e| (e.key.clone(), e.value.clone()))
+                        .collect();
                     let labels = std::collections::HashMap::new();
 
                     match runtime
-                        .run_container(&container_name, &svc.image, &port_refs, &[], &labels)
+                        .run_container(
+                            &container_name,
+                            &svc.image,
+                            &port_refs,
+                            &env_refs,
+                            &labels,
+                            &svc.volumes,
+                            &svc.networks,
+                        )
                         .await
                     {
                         Ok(cid) => {
@@ -1188,11 +1335,24 @@ async fn handle_service(
             for (i, c) in containers.iter().enumerate() {
                 let new_name = format!("{}-new-{}", svc.name, i + 1);
                 let port_refs: Vec<PortMapping> = svc.ports.clone();
+                let env_refs: Vec<(String, String)> = svc
+                    .env
+                    .iter()
+                    .map(|e| (e.key.clone(), e.value.clone()))
+                    .collect();
                 let labels = std::collections::HashMap::new();
 
                 println!("  🚀 Deploying {new_name} ({new_image})...");
                 match runtime
-                    .run_container(&new_name, &new_image, &port_refs, &[], &labels)
+                    .run_container(
+                        &new_name,
+                        &new_image,
+                        &port_refs,
+                        &env_refs,
+                        &labels,
+                        &svc.volumes,
+                        &svc.networks,
+                    )
                     .await
                 {
                     Ok(cid) => {
@@ -1663,7 +1823,11 @@ async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
 
 // ── Helpers ──
 
-async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) {
+async fn health_check_loop(
+    state: Arc<StateStore>,
+    runtime: Arc<PodmanRuntime>,
+    data_dir: std::path::PathBuf,
+) {
     loop {
         sleep(Duration::from_secs(30)).await;
         let services = match state.list_services() {
@@ -1696,13 +1860,17 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
                         continue;
                     }
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
+                    let env_refs =
+                        sparrow_core::vault::resolve_secrets(&svc.env, &data_dir, &state);
                     match runtime
                         .run_container(
                             &c.name,
                             &svc.image,
                             &port_refs,
-                            &[],
+                            &env_refs,
                             &std::collections::HashMap::new(),
+                            &svc.volumes,
+                            &svc.networks,
                         )
                         .await
                     {
@@ -1736,13 +1904,17 @@ async fn health_check_loop(state: Arc<StateStore>, runtime: Arc<PodmanRuntime>) 
                 for i in (running + 1)..=desired {
                     let cname = format!("{}-{}", svc.name, i);
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
+                    let env_refs =
+                        sparrow_core::vault::resolve_secrets(&svc.env, &data_dir, &state);
                     match runtime
                         .run_container(
                             &cname,
                             &svc.image,
                             &port_refs,
-                            &[],
+                            &env_refs,
                             &std::collections::HashMap::new(),
+                            &svc.volumes,
+                            &svc.networks,
                         )
                         .await
                     {

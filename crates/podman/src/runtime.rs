@@ -33,6 +33,7 @@ impl PodmanRuntime {
     }
 
     /// Run a container
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_container(
         &self,
         name: &str,
@@ -40,6 +41,8 @@ impl PodmanRuntime {
         ports: &[PortMapping],
         env: &[(String, String)],
         labels: &HashMap<String, String>,
+        volumes: &[VolumeMount],
+        networks: &[String],
     ) -> anyhow::Result<String> {
         let image = ensure_registry(image);
         let mut cmd = tokio::process::Command::new("podman");
@@ -76,6 +79,16 @@ impl PodmanRuntime {
 
         for (k, v) in labels {
             cmd.arg("--label").arg(format!("{}.{}={}", "sparrow", k, v));
+        }
+
+        for vol in volumes {
+            let mode = if vol.read_only { ":ro" } else { "" };
+            cmd.arg("-v")
+                .arg(format!("{}:{}{}", vol.source, vol.target, mode));
+        }
+
+        for net in networks {
+            cmd.arg("--network").arg(net);
         }
 
         cmd.arg("--restart").arg(match name.contains("test") {

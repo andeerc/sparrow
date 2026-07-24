@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 sparrow-raft = { path = "../raft" }
 sparrow-core = { path = "../core" }
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"
@@ -20,3 +20,7 @@ http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 bytes = "1"
 bincode = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rustls = "0.23"
+rustls-pki-types = "1"
+rustls-pemfile = "2"

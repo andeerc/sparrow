@@ -62,6 +62,38 @@ impl Vault {
     }
 }
 
+/// Resolves environment variable secrets of the form `secret:name` by decrypting them using the vault.
+pub fn resolve_secrets(
+    env_vars: &[sparrow_proto::EnvVar],
+    config_dir: &Path,
+    state: &crate::state::StateStore,
+) -> Vec<(String, String)> {
+    let vault = Vault::open(config_dir).ok();
+    env_vars
+        .iter()
+        .map(|e| {
+            if e.value.starts_with("secret:") {
+                let name = e.value.strip_prefix("secret:").unwrap_or(&e.value);
+                if let Some(ref v) = vault {
+                    if let Ok(Some(encrypted)) = state.get_secret(name) {
+                        if let Some(decrypted) = v.decrypt(&encrypted) {
+                            return (e.key.clone(), decrypted);
+                        }
+                    }
+                }
+                tracing::warn!(
+                    "Failed to decrypt secret '{}' for env var '{}'",
+                    name,
+                    e.key
+                );
+                (e.key.clone(), String::new())
+            } else {
+                (e.key.clone(), e.value.clone())
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +123,39 @@ mod tests {
     fn test_vault_open_missing_key() {
         let dir = TempDir::new().unwrap();
         assert!(Vault::open(dir.path()).is_err());
+    }
+
+    #[test]
+    fn test_resolve_secrets() {
+        let dir = TempDir::new().unwrap();
+        let vault = Vault::init(dir.path()).unwrap();
+        let db = dir.path().join("test.db");
+        let state = crate::state::StateStore::new(db.to_str().unwrap()).unwrap();
+
+        // Save a mock secret
+        let enc = vault.encrypt("superpassword");
+        state.set_secret("db/password", &enc).unwrap();
+
+        let env_vars = vec![
+            sparrow_proto::EnvVar {
+                key: "PLAIN_VAR".to_string(),
+                value: "plainvalue".to_string(),
+            },
+            sparrow_proto::EnvVar {
+                key: "SECRET_VAR".to_string(),
+                value: "secret:db/password".to_string(),
+            },
+        ];
+
+        let resolved = resolve_secrets(&env_vars, dir.path(), &state);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            resolved[0],
+            ("PLAIN_VAR".to_string(), "plainvalue".to_string())
+        );
+        assert_eq!(
+            resolved[1],
+            ("SECRET_VAR".to_string(), "superpassword".to_string())
+        );
     }
 }

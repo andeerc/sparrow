@@ -21,6 +21,7 @@ pub struct AutoscaleEngine {
     #[allow(dead_code)]
     runtime: Arc<PodmanRuntime>,
     last_action: Mutex<HashMap<String, Instant>>,
+    data_dir: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -32,11 +33,12 @@ pub struct PollResult {
 }
 
 impl AutoscaleEngine {
-    pub fn new(store: Arc<StateStore>, runtime: Arc<PodmanRuntime>) -> Self {
+    pub fn new(store: Arc<StateStore>, runtime: Arc<PodmanRuntime>, data_dir: &str) -> Self {
         Self {
             store,
             runtime,
             last_action: Mutex::new(HashMap::new()),
+            data_dir: data_dir.to_string(),
         }
     }
 
@@ -93,7 +95,7 @@ impl AutoscaleEngine {
 
     pub async fn decide_scale(
         &self,
-        _name: &str,
+        name: &str,
         current_replicas: u32,
         avg_cpu: f64,
         max_mem_pct: f64,
@@ -104,18 +106,49 @@ impl AutoscaleEngine {
             None => return ScaleDecision::Noop,
         };
 
+        // Load historical metrics for trend analysis (last 10 points = 5 min)
+        let history = self.store.load_recent_metrics(name, 10).unwrap_or_default();
+
+        // Compute Simple Linear Regression slope for CPU trend
+        let cpu_slope = linear_regression_slope(&history);
+
+        // Predict next CPU value (current + slope * 2 steps = ~1 min ahead)
+        let predicted_cpu = avg_cpu + cpu_slope * 2.0;
+
         let cpu_over = avg_cpu > cpu_target;
+        let cpu_approaching = predicted_cpu > cpu_target && cpu_slope > 0.0;
         let mem_over = config
             .memory_target_percent
             .is_some_and(|t| max_mem_pct > t);
 
-        if (cpu_over || mem_over) && current_replicas < config.max_replicas {
+        // Predictive scale up: current high OR trending toward threshold
+        if (cpu_over || cpu_approaching || mem_over) && current_replicas < config.max_replicas {
             ScaleDecision::ScaleUp
-        } else if avg_cpu < cpu_target * 0.7 && current_replicas > config.min_replicas {
+        } else if avg_cpu < cpu_target * 0.5
+            && cpu_slope <= 0.0
+            && current_replicas > config.min_replicas
+        {
+            // Scale down only if CPU is well below target AND not rising
             ScaleDecision::ScaleDown
         } else {
             ScaleDecision::Noop
         }
+    }
+
+    pub async fn poll_and_record(&self, service_id: &str, service_name: &str) -> PollResult {
+        let metrics = self.poll_metrics(service_name).await;
+        let max_mem_pct = if metrics.max_mem > 0 {
+            (metrics.max_mem as f64) / (2.0 * 1024.0 * 1024.0 * 1024.0) * 100.0
+        } else {
+            0.0
+        };
+        let _ = self.store.record_autoscale_metric(
+            service_id,
+            metrics.avg_cpu,
+            max_mem_pct,
+            metrics.running_count as u32,
+        );
+        metrics
     }
 
     async fn run(self) {
@@ -172,6 +205,12 @@ impl AutoscaleEngine {
                 } else {
                     0.0
                 };
+                let _ = self.store.record_autoscale_metric(
+                    &svc.id,
+                    metrics.avg_cpu,
+                    max_mem_pct,
+                    svc.desired_replicas,
+                );
                 let decision = self
                     .decide_scale(
                         &svc.name,
@@ -193,15 +232,23 @@ impl AutoscaleEngine {
                         );
 
                         let ports = svc.ports.clone();
-                        let env: Vec<_> = svc
-                            .env
-                            .iter()
-                            .map(|e| (e.key.clone(), e.value.clone()))
-                            .collect();
+                        let env = crate::vault::resolve_secrets(
+                            &svc.env,
+                            std::path::Path::new(&self.data_dir),
+                            &self.store,
+                        );
 
                         match self
                             .runtime
-                            .run_container(&container_name, &svc.image, &ports, &env, &svc.labels)
+                            .run_container(
+                                &container_name,
+                                &svc.image,
+                                &ports,
+                                &env,
+                                &svc.labels,
+                                &svc.volumes,
+                                &svc.networks,
+                            )
                             .await
                         {
                             Ok(_id) => {
@@ -294,4 +341,33 @@ impl std::fmt::Debug for AutoscaleEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AutoscaleEngine").finish_non_exhaustive()
     }
+}
+
+/// Compute the slope of a simple linear regression over historical CPU data points.
+/// Positive slope = rising trend, negative = falling trend.
+fn linear_regression_slope(history: &[(f64, f64)]) -> f64 {
+    let n = history.len() as f64;
+    if n < 3.0 {
+        return 0.0;
+    }
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    let mut sum_x2 = 0.0;
+
+    for (i, (cpu, _mem)) in history.iter().enumerate() {
+        let x = i as f64;
+        let y = *cpu;
+        sum_x += x;
+        sum_y += y;
+        sum_xy += x * y;
+        sum_x2 += x * x;
+    }
+
+    let denom = n * sum_x2 - sum_x * sum_x;
+    if denom.abs() < 1e-10 {
+        return 0.0;
+    }
+
+    (n * sum_xy - sum_x * sum_y) / denom
 }

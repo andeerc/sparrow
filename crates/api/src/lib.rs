@@ -7,7 +7,10 @@ use std::time::Instant;
 
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -100,6 +103,7 @@ pub struct AppState {
     pub rate_limiter: RwLock<HashMap<String, (Instant, u64)>>,
     pub auth_token: Option<String>,
     pub vault_key: RwLock<Option<String>>,
+    pub dashboard_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -237,6 +241,7 @@ pub async fn start_api(
         .route("/api/v1/secrets/{name}", get(secret_get))
         .route("/api/v1/secrets/{name}", post(secret_set))
         .route("/api/v1/secrets/{name}", delete(secret_delete))
+        .route("/ws/dashboard", get(ws_dashboard_handler))
         .merge(dashboard::routes())
         .fallback(proxy::handle_proxy)
         .layer(middleware::from_fn_with_state(
@@ -265,6 +270,36 @@ pub async fn start_api(
             axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
         }
     }
+    Ok(())
+}
+
+/// Start a separate mTLS listener for Raft cluster communication.
+/// Requires client certificates signed by the same CA.
+pub async fn start_mtls_raft_listener(
+    state: SharedAppState,
+    listen: &str,
+    ca_pem: &str,
+    cert_pem: &str,
+    key_pem: &str,
+) -> anyhow::Result<()> {
+    let app = Router::<SharedAppState>::new()
+        .route("/raft/append_entries", post(raft_append_entries))
+        .route("/raft/vote", post(raft_vote))
+        .route("/raft/snapshot", post(raft_snapshot))
+        .route("/raft/add_learner", post(raft_add_learner))
+        .with_state(state);
+
+    let config = sparrow_raft::server_config_from_pem(ca_pem, cert_pem, key_pem)?;
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(config);
+    let addr: std::net::SocketAddr = listen
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid mTLS address '{listen}': {e}"))?;
+
+    tracing::info!("Raft mTLS listener on {addr}");
+    axum_server::bind_rustls(addr, tls_config)
+        .serve(app.into_make_service())
+        .await?;
+
     Ok(())
 }
 
@@ -632,7 +667,7 @@ pub fn init_cluster_with_auth(
     raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
     auth_token: Option<String>,
 ) -> SharedAppState {
-    init_cluster_with_vault(name, node_name, addr, raft_cluster, auth_token, None)
+    init_cluster_with_vault(name, node_name, addr, raft_cluster, auth_token, None, None)
 }
 
 pub fn init_cluster_with_vault(
@@ -642,6 +677,7 @@ pub fn init_cluster_with_vault(
     raft_cluster: Option<std::sync::Arc<sparrow_raft::RaftCluster>>,
     auth_token: Option<String>,
     vault_key: Option<String>,
+    state_store: Option<Arc<StateStore>>,
 ) -> SharedAppState {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -663,10 +699,29 @@ pub fn init_cluster_with_vault(
         )]),
     };
 
+    let mut routes = vec![];
+    let mut ips = HashMap::new();
+
+    if let Some(ref store) = state_store {
+        if let Ok(saved_routes) = store.list_proxy_routes() {
+            for (domain, target_port, service_name, tls) in saved_routes {
+                routes.push(ProxyRoute {
+                    domain,
+                    target_port,
+                    service_name,
+                    tls,
+                });
+            }
+        }
+        if let Ok(active_ips) = store.get_active_container_ips() {
+            ips = active_ips;
+        }
+    }
+
     Arc::new(AppState {
         cluster: RwLock::new(cluster),
-        proxy_routes: RwLock::new(vec![]),
-        container_ips: RwLock::new(HashMap::new()),
+        proxy_routes: RwLock::new(routes),
+        container_ips: RwLock::new(ips),
         round_robin: RwLock::new(HashMap::new()),
         autoscale_policies: RwLock::new(HashMap::new()),
         alerts: RwLock::new(AlertState {
@@ -674,10 +729,14 @@ pub fn init_cluster_with_vault(
             events: vec![],
         }),
         raft_cluster: RwLock::new(raft_cluster),
-        state_store: None,
+        state_store,
         rate_limiter: RwLock::new(HashMap::new()),
         auth_token,
         vault_key: RwLock::new(vault_key),
+        dashboard_tx: {
+            let (tx, _) = tokio::sync::broadcast::channel(64);
+            tx
+        },
     })
 }
 
@@ -907,6 +966,80 @@ async fn service_scale(
     ))
 }
 
+// ── WebSocket Dashboard ──
+
+/// WebSocket handler that pushes live cluster status every 5 seconds.
+async fn ws_dashboard_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedAppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_dashboard_ws(socket, state))
+}
+
+async fn handle_dashboard_ws(mut socket: WebSocket, state: SharedAppState) {
+    let mut rx = state.dashboard_tx.subscribe();
+    let ping_interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    // Initial status push
+    let status = build_dashboard_status(&state).await;
+    let _ = socket.send(Message::Text(status)).await;
+
+    tokio::pin!(ping_interval);
+
+    loop {
+        tokio::select! {
+            _ = ping_interval.tick() => {
+                let status = build_dashboard_status(&state).await;
+                if socket.send(Message::Text(status)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(msg) = rx.recv() => {
+                if socket.send(Message::Text(msg)).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn build_dashboard_status(state: &SharedAppState) -> String {
+    let cluster = state.cluster.read().await;
+    let nodes: Vec<_> = cluster.nodes.values().map(|n| {
+        serde_json::json!({"id": n.id, "name": n.name, "addr": n.addr, "role": n.role, "status": n.status})
+    }).collect();
+
+    let proxy_routes = state.proxy_routes.read().await;
+    let routes: Vec<_> = proxy_routes.iter().map(|r| {
+        serde_json::json!({"domain": r.domain, "target_port": r.target_port, "service": r.service_name, "tls": r.tls})
+    }).collect();
+
+    let services = state
+        .state_store
+        .as_ref()
+        .and_then(|s| s.list_services().ok())
+        .map(|svcs| {
+            svcs.into_iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "id": s.id, "name": s.name, "image": s.image,
+                        "replicas": s.desired_replicas, "ports": s.ports,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "node_count": cluster.nodes.len(),
+        "nodes": nodes,
+        "routes": routes,
+        "services": services,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+    .to_string()
+}
+
 // ── AppState helpers for main.rs ──
 
 impl AppState {
@@ -926,12 +1059,18 @@ impl AppState {
             service_name: service_name.to_string(),
             tls,
         });
+        if let Some(ref store) = self.state_store {
+            let _ = store.save_proxy_route(domain, target_port, service_name, tls);
+        }
     }
 
     /// Remove proxy route for a domain
     pub async fn remove_route(&self, domain: &str) {
         let mut routes = self.proxy_routes.write().await;
         routes.retain(|r| r.domain != domain);
+        if let Some(ref store) = self.state_store {
+            let _ = store.delete_proxy_route(domain);
+        }
     }
 
     /// Update the container IP cache for a service (add or update a container IP)

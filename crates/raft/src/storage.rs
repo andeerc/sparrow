@@ -242,10 +242,12 @@ pub struct StoredStateMachine {
     last_membership: Arc<Mutex<StoredM>>,
     snapshot_meta: Arc<Mutex<Option<Smo>>>,
     snapshot_data: Arc<Mutex<Option<Sdo>>>,
+    snapshot_dir: String,
 }
 
 impl StoredStateMachine {
-    pub fn new(path: &str) -> anyhow::Result<Self> {
+    pub fn new(path: &str, snapshot_dir: &str) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(snapshot_dir)?;
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -257,12 +259,19 @@ impl StoredStateMachine {
              );
              INSERT OR IGNORE INTO raft_sm_state (id) VALUES (1);",
         )?;
+
+        // Try to recover snapshot from disk
+        let snapshot = load_snapshot_from_disk(snapshot_dir);
+
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
             last_applied: Arc::new(Mutex::new(None)),
             last_membership: Arc::new(Mutex::new(StoredMembership::default())),
-            snapshot_meta: Arc::new(Mutex::new(None)),
-            snapshot_data: Arc::new(Mutex::new(None)),
+            snapshot_meta: Arc::new(Mutex::new(snapshot.as_ref().map(|s| s.meta.clone()))),
+            snapshot_data: Arc::new(Mutex::new(
+                snapshot.map(|s| Cursor::new(s.snapshot.into_inner())),
+            )),
+            snapshot_dir: snapshot_dir.to_string(),
         })
     }
 }
@@ -280,6 +289,44 @@ pub struct SnapshotBuilder {
     pub db: Arc<Mutex<Connection>>,
     pub last_applied: Arc<Mutex<Option<LE>>>,
     pub last_membership: Arc<Mutex<StoredM>>,
+    snapshot_dir: String,
+}
+
+/// Load a snapshot from disk (if exists) to recover state across restarts.
+/// Returns `Some(Snapshot)` if a valid snapshot file was found, `None` otherwise.
+fn load_snapshot_from_disk(snapshot_dir: &str) -> Option<SO> {
+    let snap_path = std::path::Path::new(snapshot_dir).join("snapshot.bin");
+    if !snap_path.exists() {
+        return None;
+    }
+    let data = std::fs::read(&snap_path).ok()?;
+    if data.is_empty() {
+        return None;
+    }
+    // Reconstruct snapshot state from raw bytes (no meta available at load time)
+    let snapshot = Cursor::new(data);
+    let meta = openraft::SnapshotMeta {
+        snapshot_id: "recovered".to_string(),
+        last_log_id: None,
+        last_membership: StoredMembership::default(),
+    };
+    Some(Snapshot { meta, snapshot })
+}
+
+impl SnapshotBuilder {
+    pub fn new(
+        db: Arc<Mutex<Connection>>,
+        last_applied: Arc<Mutex<Option<LE>>>,
+        last_membership: Arc<Mutex<StoredM>>,
+        snapshot_dir: &str,
+    ) -> Self {
+        Self {
+            db,
+            last_applied,
+            last_membership,
+            snapshot_dir: snapshot_dir.to_string(),
+        }
+    }
 }
 
 impl RaftSnapshotBuilder<C> for SnapshotBuilder {
@@ -318,6 +365,12 @@ impl RaftSnapshotBuilder<C> for SnapshotBuilder {
             last_log_id: la,
             last_membership: membership,
         };
+
+        // Write snapshot to disk
+        let snap_path = std::path::Path::new(&self.snapshot_dir).join("snapshot.bin");
+        if let Err(e) = std::fs::write(&snap_path, &data) {
+            tracing::warn!("Failed to persist snapshot to disk: {e}");
+        }
 
         Ok(Snapshot {
             meta,
@@ -371,7 +424,13 @@ impl RaftStateMachine<C> for StoredStateMachine {
     async fn install_snapshot(&mut self, meta: &Smo, snapshot: Sdo) -> Result<(), io::Error> {
         let data: Vec<u8> = snapshot.into_inner();
         *self.snapshot_meta.lock().unwrap() = Some(meta.clone());
-        *self.snapshot_data.lock().unwrap() = Some(Cursor::new(data));
+        *self.snapshot_data.lock().unwrap() = Some(Cursor::new(data.clone()));
+
+        // Persist to disk
+        let snap_path = std::path::Path::new(&self.snapshot_dir).join("snapshot.bin");
+        if let Err(e) = std::fs::write(&snap_path, &data) {
+            tracing::warn!("Failed to persist installed snapshot: {e}");
+        }
 
         if let Some(ref last_log_id) = meta.last_log_id {
             *self.last_applied.lock().unwrap() = Some(*last_log_id);
@@ -396,10 +455,11 @@ impl RaftStateMachine<C> for StoredStateMachine {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        SnapshotBuilder {
-            db: self.db.clone(),
-            last_applied: self.last_applied.clone(),
-            last_membership: self.last_membership.clone(),
-        }
+        SnapshotBuilder::new(
+            self.db.clone(),
+            self.last_applied.clone(),
+            self.last_membership.clone(),
+            &self.snapshot_dir,
+        )
     }
 }

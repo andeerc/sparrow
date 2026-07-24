@@ -208,6 +208,42 @@ impl StateStore {
             )?;
         }
 
+        // Migration v7: add proxy_routes table
+        let has_proxy_routes = conn
+            .prepare("SELECT domain FROM proxy_routes LIMIT 1")
+            .is_ok();
+        if !has_proxy_routes {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS proxy_routes (
+                    domain       TEXT PRIMARY KEY,
+                    target_port  INTEGER NOT NULL,
+                    service_name TEXT NOT NULL,
+                    tls          INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO schema_version (version) VALUES (7);",
+            )?;
+        }
+
+        // Migration v8: autoscale metrics history for predictive scaling
+        let has_metrics = conn
+            .prepare("SELECT service_id FROM autoscale_metrics LIMIT 1")
+            .is_ok();
+        if !has_metrics {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS autoscale_metrics (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    service_id  TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+                    avg_cpu     REAL NOT NULL,
+                    max_mem_pct REAL NOT NULL DEFAULT 0,
+                    replicas    INTEGER NOT NULL DEFAULT 0,
+                    collected_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_autoscale_metrics_svc_time
+                    ON autoscale_metrics(service_id, collected_at);
+                INSERT OR IGNORE INTO schema_version (version) VALUES (8);",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -265,6 +301,16 @@ impl StateStore {
             .filter_map(|r| r.ok())
             .collect();
         Ok(volumes)
+    }
+
+    fn load_networks(&self, conn: &Connection, service_id: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt =
+            conn.prepare("SELECT network FROM service_networks WHERE service_id = ?1")?;
+        let networks = stmt
+            .query_map(params![service_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(networks)
     }
 
     pub fn create_service(&self, spec: &ServiceSpec) -> anyhow::Result<()> {
@@ -346,6 +392,7 @@ impl StateStore {
                 let ports = self.load_ports(&conn, &id).unwrap_or_default();
                 let env = self.load_env(&conn, &id).unwrap_or_default();
                 let volumes = self.load_volumes(&conn, &id).unwrap_or_default();
+                let networks = self.load_networks(&conn, &id).unwrap_or_default();
                 Ok(ServiceSpec {
                     id,
                     name,
@@ -354,7 +401,7 @@ impl StateStore {
                     ports,
                     env,
                     volumes,
-                    networks: vec![],
+                    networks,
                     labels: std::collections::HashMap::new(),
                     resources: None,
                     restart_policy: match rp.as_str() {
@@ -404,6 +451,7 @@ impl StateStore {
                 let ports = self.load_ports(conn, &id).unwrap_or_default();
                 let env = self.load_env(conn, &id).unwrap_or_default();
                 let volumes = self.load_volumes(conn, &id).unwrap_or_default();
+                let networks = self.load_networks(conn, &id).unwrap_or_default();
                 Ok(Some(ServiceSpec {
                     id,
                     name,
@@ -412,7 +460,7 @@ impl StateStore {
                     ports,
                     env,
                     volumes,
-                    networks: vec![],
+                    networks,
                     labels: std::collections::HashMap::new(),
                     resources: None,
                     restart_policy: match rp.as_str() {
@@ -831,6 +879,120 @@ impl StateStore {
         let conn = self.conn()?;
         let affected = conn.execute("DELETE FROM secrets WHERE name = ?1", params![name])?;
         Ok(affected > 0)
+    }
+
+    pub fn save_proxy_route(
+        &self,
+        domain: &str,
+        target_port: u16,
+        service_name: &str,
+        tls: bool,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO proxy_routes (domain, target_port, service_name, tls) VALUES (?1, ?2, ?3, ?4)",
+            params![domain, target_port, service_name, tls as i32],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_proxy_route(&self, domain: &str) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            "DELETE FROM proxy_routes WHERE domain = ?1",
+            params![domain],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn list_proxy_routes(&self) -> anyhow::Result<Vec<(String, u16, String, bool)>> {
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT domain, target_port, service_name, tls FROM proxy_routes")?;
+        let rows = stmt.query_map([], |row| {
+            let tls_val: i32 = row.get(3)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u16>(1)?,
+                row.get::<_, String>(2)?,
+                tls_val != 0,
+            ))
+        })?;
+        let mut routes = vec![];
+        for val in rows.flatten() {
+            routes.push(val);
+        }
+        Ok(routes)
+    }
+
+    pub fn get_active_container_ips(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, Vec<String>>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.name, c.ip_address 
+             FROM containers c 
+             JOIN services s ON c.service_id = s.id 
+             WHERE c.state = 'Running' AND c.ip_address != ''",
+        )?;
+
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        for (service_name, ip) in rows.flatten() {
+            map.entry(service_name).or_default().push(ip);
+        }
+        Ok(map)
+    }
+
+    /// Record autoscale metric data point for predictive analysis.
+    pub fn record_autoscale_metric(
+        &self,
+        service_id: &str,
+        avg_cpu: f64,
+        max_mem_pct: f64,
+        replicas: u32,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO autoscale_metrics (service_id, avg_cpu, max_mem_pct, replicas)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![service_id, avg_cpu, max_mem_pct, replicas],
+        )?;
+        Ok(())
+    }
+
+    /// Load recent metric history for predictive scaling (last N data points).
+    /// Returns Vec of (avg_cpu, max_mem_pct) ordered oldest-first.
+    pub fn load_recent_metrics(
+        &self,
+        service_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<Vec<(f64, f64)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT avg_cpu, max_mem_pct FROM autoscale_metrics
+             WHERE service_id = ?1 ORDER BY collected_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![service_id, limit], |row| {
+            Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?))
+        })?;
+        let mut points: Vec<(f64, f64)> = rows.flatten().collect();
+        points.reverse();
+        Ok(points)
+    }
+
+    /// Prune old metric data older than the given number of hours.
+    pub fn prune_autoscale_metrics(&self, older_than_hours: u32) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM autoscale_metrics WHERE collected_at < datetime('now', ?1)",
+            params![format!("-{older_than_hours} hours")],
+        )?;
+        Ok(())
     }
 }
 

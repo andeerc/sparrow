@@ -235,6 +235,7 @@ impl RaftLogStorage<C> for StoredRaftLog {
     }
 }
 
+#[derive(Clone)]
 pub struct StoredStateMachine {
     #[allow(dead_code)]
     db: Arc<Mutex<Connection>>,
@@ -243,6 +244,11 @@ pub struct StoredStateMachine {
     snapshot_meta: Arc<Mutex<Option<Smo>>>,
     snapshot_data: Arc<Mutex<Option<Sdo>>>,
     snapshot_dir: String,
+    /// Subscriber queue for applied [`RaftRequest`]s.
+    /// The leader's local applier drains this and mirrors each committed
+    /// write into its own `StateStore`, closing the Raft→SQLite loop.
+    /// Followers apply the same way via their own queue.
+    applied_tx: tokio::sync::broadcast::Sender<RaftRequest>,
 }
 
 impl StoredStateMachine {
@@ -272,7 +278,14 @@ impl StoredStateMachine {
                 snapshot.map(|s| Cursor::new(s.snapshot.into_inner())),
             )),
             snapshot_dir: snapshot_dir.to_string(),
+            applied_tx: tokio::sync::broadcast::channel(256).0,
         })
+    }
+
+    /// Subscribe to applied [`RaftRequest`]s in commit order.
+    /// Used by the local applier loop that mirrors Raft into `StateStore`.
+    pub fn subscribe_applied(&self) -> tokio::sync::broadcast::Receiver<RaftRequest> {
+        self.applied_tx.subscribe()
     }
 }
 
@@ -407,11 +420,27 @@ impl RaftStateMachine<C> for StoredStateMachine {
             *self.last_applied.lock().unwrap() = Some(log_id);
 
             if let Some(responder) = responder {
-                responder.send(RaftResponse {
-                    success: true,
-                    data: Vec::new(),
-                    error: None,
-                });
+                // EntryPayload is already typed: Normal carries RaftRequest.
+                // A poisoned/unexpected variant fails the client write loudly.
+                match &entry.payload {
+                    openraft::EntryPayload::Normal(req) => {
+                        // Fan out to local applier(s); lagged receivers just
+                        // miss this entry and re-sync via snapshot + replay.
+                        let _ = self.applied_tx.send(req.clone());
+                        responder.send(RaftResponse {
+                            success: true,
+                            data: Vec::new(),
+                            error: None,
+                        });
+                    }
+                    other => {
+                        responder.send(RaftResponse {
+                            success: false,
+                            data: Vec::new(),
+                            error: Some(format!("unexpected entry payload: {other:?}")),
+                        });
+                    }
+                }
             }
         }
         Ok(())

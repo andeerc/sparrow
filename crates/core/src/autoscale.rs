@@ -28,6 +28,7 @@ pub struct AutoscaleEngine {
 pub struct PollResult {
     pub avg_cpu: f64,
     pub max_mem: u64,
+    pub max_mem_limit: u64,
     pub container_count: usize,
     pub running_count: usize,
 }
@@ -64,13 +65,17 @@ impl AutoscaleEngine {
 
         let mut total_cpu = 0.0f64;
         let mut max_mem = 0u64;
+        let mut max_mem_limit = 0u64;
 
         for c in &running {
             match self.runtime.stats(&c.name).await {
-                Ok((cpu, mem)) => {
+                Ok((cpu, mem, limit)) => {
                     total_cpu += cpu;
                     if mem > max_mem {
                         max_mem = mem;
+                    }
+                    if limit > max_mem_limit {
+                        max_mem_limit = limit;
                     }
                 }
                 Err(e) => {
@@ -88,6 +93,7 @@ impl AutoscaleEngine {
         PollResult {
             avg_cpu,
             max_mem,
+            max_mem_limit,
             container_count,
             running_count,
         }
@@ -95,7 +101,7 @@ impl AutoscaleEngine {
 
     pub async fn decide_scale(
         &self,
-        name: &str,
+        service_id: &str,
         current_replicas: u32,
         avg_cpu: f64,
         max_mem_pct: f64,
@@ -107,8 +113,10 @@ impl AutoscaleEngine {
         };
 
         // Load historical metrics for trend analysis (last 10 points = 5 min)
-        let history = self.store.load_recent_metrics(name, 10).unwrap_or_default();
-
+        let history = self
+            .store
+            .load_recent_metrics(service_id, 10)
+            .unwrap_or_default();
         // Compute Simple Linear Regression slope for CPU trend
         let cpu_slope = linear_regression_slope(&history);
 
@@ -137,11 +145,7 @@ impl AutoscaleEngine {
 
     pub async fn poll_and_record(&self, service_id: &str, service_name: &str) -> PollResult {
         let metrics = self.poll_metrics(service_name).await;
-        let max_mem_pct = if metrics.max_mem > 0 {
-            (metrics.max_mem as f64) / (2.0 * 1024.0 * 1024.0 * 1024.0) * 100.0
-        } else {
-            0.0
-        };
+        let max_mem_pct = mem_usage_pct(metrics.max_mem, metrics.max_mem_limit);
         let _ = self.store.record_autoscale_metric(
             service_id,
             metrics.avg_cpu,
@@ -200,11 +204,7 @@ impl AutoscaleEngine {
                     "service metrics"
                 );
 
-                let max_mem_pct = if metrics.max_mem > 0 {
-                    (metrics.max_mem as f64) / (2.0 * 1024.0 * 1024.0 * 1024.0) * 100.0
-                } else {
-                    0.0
-                };
+                let max_mem_pct = mem_usage_pct(metrics.max_mem, metrics.max_mem_limit);
                 let _ = self.store.record_autoscale_metric(
                     &svc.id,
                     metrics.avg_cpu,
@@ -213,7 +213,7 @@ impl AutoscaleEngine {
                 );
                 let decision = self
                     .decide_scale(
-                        &svc.name,
+                        &svc.id,
                         svc.desired_replicas,
                         metrics.avg_cpu,
                         max_mem_pct,
@@ -232,11 +232,17 @@ impl AutoscaleEngine {
                         );
 
                         let ports = svc.ports.clone();
-                        let env = crate::vault::resolve_secrets(
+                        let env = match crate::vault::resolve_secrets(
                             &svc.env,
                             std::path::Path::new(&self.data_dir),
                             &self.store,
-                        );
+                        ) {
+                            Ok(env) => env,
+                            Err(e) => {
+                                tracing::error!(service = %svc.name, error = %e, "scale up aborted: secret resolution failed");
+                                continue;
+                            }
+                        };
 
                         match self
                             .runtime
@@ -343,8 +349,17 @@ impl std::fmt::Debug for AutoscaleEngine {
     }
 }
 
-/// Compute the slope of a simple linear regression over historical CPU data points.
-/// Positive slope = rising trend, negative = falling trend.
+/// Memory usage as a percentage of the container limit reported by
+/// `podman stats` (`MemUsage: used / limit`). Unknown/zero limit yields 0.0
+/// instead of dividing by a hardcoded host size.
+fn mem_usage_pct(used_bytes: u64, limit_bytes: u64) -> f64 {
+    if used_bytes == 0 || limit_bytes == 0 {
+        0.0
+    } else {
+        used_bytes as f64 / limit_bytes as f64 * 100.0
+    }
+}
+
 fn linear_regression_slope(history: &[(f64, f64)]) -> f64 {
     let n = history.len() as f64;
     if n < 3.0 {
@@ -370,4 +385,139 @@ fn linear_regression_slope(history: &[(f64, f64)]) -> f64 {
     }
 
     (n * sum_xy - sum_x * sum_y) / denom
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sparrow_proto::AutoscalingConfig;
+
+    fn test_engine() -> (AutoscaleEngine, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.db");
+        let store = Arc::new(StateStore::new(db.to_str().unwrap()).unwrap());
+        // Leak dir: store holds only the db path string, tempdir cleanup is best-effort.
+        std::mem::forget(dir);
+        let runtime = Arc::new(PodmanRuntime::new(true));
+        let mut spec = sparrow_proto::ServiceSpec::new("web", "nginx");
+        spec.desired_replicas = 2;
+        store.create_service(&spec).unwrap();
+        let engine = AutoscaleEngine::new(store, runtime, "/tmp");
+        (engine, spec.id)
+    }
+
+    fn config(cpu: Option<f64>, mem: Option<f64>) -> AutoscalingConfig {
+        AutoscalingConfig {
+            min_replicas: 1,
+            max_replicas: 5,
+            cpu_target_percent: cpu,
+            memory_target_percent: mem,
+            cooldown_seconds: 60,
+        }
+    }
+
+    fn seed_history(engine: &AutoscaleEngine, service_id: &str, points: &[(f64, f64)]) {
+        for (cpu, mem) in points {
+            engine
+                .store
+                .record_autoscale_metric(service_id, *cpu, *mem, 2)
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn no_cpu_target_is_noop() {
+        let (engine, id) = test_engine();
+        let d = engine
+            .decide_scale(&id, 2, 95.0, 95.0, &config(None, None))
+            .await;
+        assert_eq!(d, ScaleDecision::Noop);
+    }
+
+    #[tokio::test]
+    async fn cpu_over_target_scales_up() {
+        let (engine, id) = test_engine();
+        seed_history(&engine, &id, &[(20.0, 10.0); 10]);
+        let d = engine
+            .decide_scale(&id, 2, 90.0, 10.0, &config(Some(70.0), None))
+            .await;
+        assert_eq!(d, ScaleDecision::ScaleUp);
+    }
+
+    #[tokio::test]
+    async fn mem_over_target_scales_up() {
+        let (engine, id) = test_engine();
+        seed_history(&engine, &id, &[(20.0, 10.0); 10]);
+        let d = engine
+            .decide_scale(&id, 2, 20.0, 90.0, &config(Some(70.0), Some(80.0)))
+            .await;
+        assert_eq!(d, ScaleDecision::ScaleUp);
+    }
+
+    #[tokio::test]
+    async fn rising_trend_toward_target_scales_up() {
+        // Steady climb 40→85: slope = 5, predicted = current + 10.
+        let (engine, id) = test_engine();
+        let points: Vec<(f64, f64)> = (0..10).map(|i| (40.0 + i as f64 * 5.0, 10.0)).collect();
+        seed_history(&engine, &id, &points);
+        let d = engine
+            .decide_scale(&id, 2, 65.0, 10.0, &config(Some(70.0), None))
+            .await;
+        assert_eq!(d, ScaleDecision::ScaleUp);
+    }
+
+    #[tokio::test]
+    async fn low_flat_cpu_scales_down() {
+        let (engine, id) = test_engine();
+        seed_history(&engine, &id, &[(20.0, 10.0); 10]);
+        let d = engine
+            .decide_scale(&id, 3, 20.0, 10.0, &config(Some(70.0), None))
+            .await;
+        assert_eq!(d, ScaleDecision::ScaleDown);
+    }
+
+    #[tokio::test]
+    async fn at_min_replicas_never_scales_down() {
+        let (engine, id) = test_engine();
+        seed_history(&engine, &id, &[(5.0, 5.0); 10]);
+        let d = engine
+            .decide_scale(&id, 1, 5.0, 5.0, &config(Some(70.0), None))
+            .await;
+        assert_eq!(d, ScaleDecision::Noop);
+    }
+
+    #[tokio::test]
+    async fn at_max_replicas_never_scales_up() {
+        let (engine, id) = test_engine();
+        seed_history(&engine, &id, &[(95.0, 10.0); 10]);
+        let d = engine
+            .decide_scale(&id, 5, 95.0, 10.0, &config(Some(70.0), None))
+            .await;
+        assert_eq!(d, ScaleDecision::Noop);
+    }
+
+    #[tokio::test]
+    async fn mid_cpu_flat_is_noop() {
+        let (engine, id) = test_engine();
+        seed_history(&engine, &id, &[(50.0, 10.0); 10]);
+        let d = engine
+            .decide_scale(&id, 2, 50.0, 10.0, &config(Some(70.0), None))
+            .await;
+        assert_eq!(d, ScaleDecision::Noop);
+    }
+
+    #[test]
+    fn mem_pct_uses_container_limit() {
+        // 1 GiB used of a 2 GiB limit — the old code hardcoded this exact
+        // divisor; the helper must agree here but generalize elsewhere.
+        assert!((mem_usage_pct(1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024) - 50.0).abs() < 1e-9);
+        assert!((mem_usage_pct(512 * 1024 * 1024, 512 * 1024 * 1024) - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mem_pct_zero_limit_is_zero() {
+        // Unlimited containers / unknown limit must not scale on memory.
+        assert_eq!(mem_usage_pct(512 * 1024 * 1024, 0), 0.0);
+        assert_eq!(mem_usage_pct(0, 1024), 0.0);
+    }
 }

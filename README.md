@@ -197,32 +197,32 @@ logging:
 
 ## Instalação
 
-### Docker (Codeberg Packages)
+### Docker (GHCR)
 
 ```bash
-docker pull codeberg.org/andeerc/sparrow:latest
-docker run --rm codeberg.org/andeerc/sparrow:latest --help
+docker pull ghcr.io/andeerc/sparrow:latest
+docker run --rm ghcr.io/andeerc/sparrow:latest --help
 ```
 
 ### Installer (recomendado)
 
 ```bash
-curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash
+curl -sfL https://raw.githubusercontent.com/andeerc/sparrow/main/install.sh | bash
 ```
 
 Ou com systemd services:
 
 ```bash
-curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash -s -- --systemd
+curl -sfL https://raw.githubusercontent.com/andeerc/sparrow/main/install.sh | bash -s -- --systemd
 ```
 
 ### Binário (Releases)
 
-Baixe o binário da [última release](https://codeberg.org/andeerc/sparrow/releases):
+Baixe o binário da [última release](https://github.com/andeerc/sparrow/releases):
 
 ```bash
 # Linux x86_64 — baixa a última release
-curl -L -o sparrow $(curl -s https://codeberg.org/api/v1/repos/andeerc/sparrow/releases/latest | \
+curl -L -o sparrow $(curl -s -H "Accept: application/vnd.github+json" -H "User-Agent: sparrow-installer" https://api.github.com/repos/andeerc/sparrow/releases/latest | \
   grep -o '"browser_download_url":"[^"]*x86_64-linux"' | cut -d'"' -f4)
 chmod +x sparrow
 sudo mv sparrow /usr/local/bin/
@@ -231,7 +231,7 @@ sudo mv sparrow /usr/local/bin/
 ### Compilando da fonte
 
 ```bash
-git clone https://codeberg.org/andeerc/sparrow.git
+git clone https://github.com/andeerc/sparrow.git
 cd sparrow
 cargo build --release
 ./install.sh    # copia binário + configura completions + config

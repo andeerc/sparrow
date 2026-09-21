@@ -24,4 +24,8 @@ pub use config::*;
 pub use deploy::*;
 pub use error::*;
 pub use network::*;
-pub use state::*;
+pub use sparrow_proto::{
+    AlertChannelRecord, AlertEventRecord, AlertRule, AutoscaleEvent, AutoscalingConfig,
+    ContainerState, ContainerStatus, EnvVar, PortMapping, Protocol, ResourceSpec, RestartPolicy,
+    ServiceSpec, VolumeMount,
+};

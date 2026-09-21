@@ -38,6 +38,17 @@ impl NetworkConnection {
         }
     }
 
+    /// Connection that always fails closed: used when mTLS setup fails so we
+    /// NEVER silently downgrade to plaintext. Points at an unroutable address
+    /// so every RPC surfaces `Unreachable` instead of leaking Raft traffic.
+    pub fn new_unreachable(peer_addr: &str) -> Self {
+        let _ = peer_addr;
+        Self {
+            peer_url: "http://127.0.0.1:9".to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
     pub fn new_tls(peer_addr: &str, tls: &TlsConfig) -> anyhow::Result<Self> {
         let base_url = if peer_addr.contains("://") {
             peer_addr.to_string()
@@ -184,11 +195,16 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
         node: &BasicNode,
     ) -> impl Future<Output = Self::Network> + Send {
         let addr = node.addr.clone();
-        let tls = self.tls.take();
+        let tls = self.tls.clone();
         async move {
-            match tls {
-                Some(ref cfg) => NetworkConnection::new_tls(&addr, cfg)
-                    .unwrap_or_else(|_| NetworkConnection::new(&addr)),
+            match &tls {
+                Some(cfg) => match NetworkConnection::new_tls(&addr, cfg) {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::warn!(peer = %addr, error = %e, "mTLS setup failed, refusing plaintext downgrade");
+                        NetworkConnection::new_unreachable(&addr)
+                    }
+                },
                 None => NetworkConnection::new(&addr),
             }
         }

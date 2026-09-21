@@ -65,7 +65,7 @@ pub enum Command {
         stdio: bool,
     },
 
-    /// Deploy from YAML file
+    /// Deploy from YAML file (sparrow/v1 manifest or docker-compose subset)
     Deploy {
         /// Path to YAML file
         file: String,
@@ -113,6 +113,8 @@ pub enum UpdateAction {
     Check,
     /// Download and install the latest version
     Install,
+    /// Restore the binary saved before the last `update install`
+    Rollback,
 }
 
 #[derive(Subcommand, Debug)]
@@ -158,9 +160,22 @@ pub enum ClusterAction {
         /// Leader address
         addr: String,
 
-        /// Join token
+        /// Join token (SPARJOIN.<node-id>.<ca-pem-b64>.<ca-key-b64>)
         #[arg(long)]
         token: String,
+    },
+
+    /// Print a join token for a new node (run on the leader).
+    /// The token embeds the CA cert + CA key so the joiner mints a cert
+    /// the leader already trusts — no manual ca.pem copy.
+    JoinToken {
+        /// Node id for the joiner (must be unique in the cluster)
+        #[arg(long)]
+        node_id: u64,
+
+        /// Advertised address of the joiner (host:port or ip:port)
+        #[arg(long)]
+        addr: String,
     },
 
     /// Show cluster status
@@ -475,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_cli_config_flag() {
-        let cmd = Cli::try_parse_from(&["sparrow", "--config", "/tmp/cfg.yaml", "status"]).unwrap();
+        let cmd = Cli::try_parse_from(["sparrow", "--config", "/tmp/cfg.yaml", "status"]).unwrap();
         assert_eq!(cmd.config, Some("/tmp/cfg.yaml".into()));
         assert!(matches!(cmd.command, Command::Status));
     }
@@ -823,7 +838,7 @@ mod tests {
     #[test]
     fn test_parse_version_flag_not_consuming_command() {
         // --version is handled by clap before reaching our parse, just verify help works
-        let result = Cli::try_parse_from(&["sparrow", "status"]);
+        let result = Cli::try_parse_from(["sparrow", "status"]);
         assert!(result.is_ok());
     }
 
@@ -845,6 +860,37 @@ mod tests {
             &cmd,
             Command::Update {
                 action: UpdateAction::Install
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_cluster_join_token() {
+        let cmd = parse(&[
+            "sparrow",
+            "cluster",
+            "join-token",
+            "--node-id",
+            "3",
+            "--addr",
+            "10.0.0.3:7443",
+        ]);
+        if let Command::Cluster { action } = &cmd {
+            assert!(
+                matches!(action, ClusterAction::JoinToken { node_id, addr } if *node_id == 3 && addr == "10.0.0.3:7443")
+            );
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn test_parse_update_rollback() {
+        let cmd = parse(&["sparrow", "update", "rollback"]);
+        assert!(matches!(
+            &cmd,
+            Command::Update {
+                action: UpdateAction::Rollback
             }
         ));
     }

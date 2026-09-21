@@ -261,38 +261,42 @@ Sem precisar restartar o proxy. Sem editar config. Zero downtime.
 
 ## Funcionalidades
 
+> Estado real em v0.9.6 (`crates/api/src/proxy.rs:26-148`,
+> `crates/api/src/lib.rs:130-182`): proxy HTTP puro por `Host`, lookup
+> SQLite→memória (`find_route`), round-robin sobre IPs de containers
+> Running (`resolve_target`, fallback `127.0.0.1`), rate-limit global
+> 100 req/min por `x-forwarded-for` (→ 429), sem TLS/ACME, sem
+> path-routing/wildcard/sticky/gRPC/CORS/auth. Linhas marcadas ⏳/❌
+> continuam roadmap.
+
 | Feature | Status |
 |---|---|
 | HTTP/1.1 | ✅ |
-| HTTP/2 | ✅ |
-| HTTPS (rustls) | ✅ |
-| Let's Encrypt auto | ✅ |
-| Cert custom | ✅ |
-| Self-signed dev | ✅ |
-| Host-based routing | ✅ |
-| Path-based routing | ✅ |
-| Wildcard domain | ✅ |
-| Round-robin LB | ✅ |
-| Least connections LB | ✅ |
-| IP hash (sticky) | ✅ |
-| Cookie sticky | ✅ |
-| Rate limiting | ✅ |
-| Health checks | ✅ |
-| Unhealthy drain | ✅ |
-| WebSocket | ✅ |
-| gRPC | ✅ |
-| CORS config | ✅ |
-| Basic auth | ✅ |
-| IP whitelist | ✅ |
-| Access log | ✅ |
-| Structured logging (JSON) | ✅ |
-| Request timeout | ✅ |
-| Body size limit | ✅ |
-| Buffer pool (zero-copy) | ✅ |
-| Connection pooling | ✅ |
-| Graceful shutdown | ✅ |
-| Metrics (Prometheus) | ✅ |
-| Custom error pages | ✅ |
+| HTTP/2 | ✅ (via hyper, sem teste dedicado) |
+| Host-based routing | ✅ (`find_route`) |
+| Round-robin LB | ✅ (`resolve_target`) |
+| Rate limiting (100/min global) | ✅ (`rate_limit_check` → 429) |
+| WebSocket (forward) | ✅ (`forward_ws`) |
+| Metrics (3 gauges `/metrics`) | ✅ (`metrics`) |
+| HTTPS (rustls) no proxy | ❌ — só API/mTLS Raft com PEM manual (`start_api`, `start_mtls_raft_listener`) |
+| Let's Encrypt auto / ACME | ❌ (futuro — sem `acme-client` no workspace) |
+| Cert custom / self-signed no proxy | ❌ (futuro) |
+| Path-based routing | ❌ (futuro) |
+| Wildcard domain | ❌ (futuro) |
+| Least connections LB | ❌ (só round-robin) |
+| IP hash (sticky) | ❌ (futuro) |
+| Cookie sticky | ❌ (futuro) |
+| Health checks / unhealthy drain | ❌ (health-loop só reinicia/escala, sem remover do pool) |
+| gRPC | ❌ (futuro — sem tonic no workspace) |
+| CORS config | ❌ (futuro) |
+| Basic auth | ❌ (só Bearer opcional na API) |
+| IP whitelist | ❌ (futuro) |
+| Access log / structured logging | ❌ (só `tracing`, sem access log) |
+| Request timeout / body limit | ❌ (futuro) |
+| Buffer pool (zero-copy) | ❌ (futuro) |
+| Connection pooling | ❌ (futuro) |
+| Graceful shutdown | ❌ (futuro) |
+| Custom error pages | ❌ (futuro) |
 | PROXY protocol | ⏳ |
 | HTTP/3 (QUIC) | ⏳ |
 | WAF (Web App Firewall) | ❌ (futuro) |

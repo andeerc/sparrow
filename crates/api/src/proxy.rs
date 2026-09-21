@@ -111,11 +111,17 @@ impl ProxyService {
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         );
 
-        // Standard reverse proxy headers
-        headers_fwd.insert(
-            header::HeaderName::from_static("x-forwarded-for"),
-            "127.0.0.1".parse().unwrap(),
-        );
+        // Preserve the downstream peer so the API's ConnectInfo rate limiter
+        // can key on the real client. `parts.extensions` carries
+        // `ConnectInfo<SocketAddr>` from axum's serve layer.
+        if let Some(peer) = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        {
+            if let Ok(v) = peer.0.ip().to_string().parse() {
+                headers_fwd.insert(header::HeaderName::from_static("x-forwarded-for"), v);
+            }
+        }
         headers_fwd.insert(
             header::HeaderName::from_static("x-forwarded-proto"),
             "http".parse().unwrap(),
@@ -124,7 +130,6 @@ impl ProxyService {
             header::HeaderName::from_static("x-forwarded-host"),
             host.parse().unwrap(),
         );
-
         let mut req_builder = hyper::Request::builder()
             .method(&parts.method)
             .uri(target_uri);

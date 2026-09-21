@@ -11,7 +11,7 @@
 
 ```bash
 # Compilar
-git clone https://codeberg.org/andeerc/sparrow.git
+git clone https://github.com/andeerc/sparrow.git
 cd sparrow
 cargo build --release
 sudo cp target/release/sparrow /usr/local/bin/
@@ -147,30 +147,38 @@ sparrow deploy -f app.yaml
 
 ## Roadmap (Fases)
 
-### Fase 1 — MVP (3 meses)
-- [x] Cluster init/join multi-node
-- [x] Service create/scale/rm/ls
+> Estado real em v0.9.6 (fonte: código, não este checklist):
+> single-node funcional; `cluster init` exige foreground; `cluster join`
+> precisa de `ca.pem` copiado do líder e permanece vivo a partir desta
+> versão; Raft replica só membership (sem `ServiceSpec`/escala);
+> proxy HTTP host→round-robin sem TLS/ACME; overlay Wireguard são só
+> helpers manuais (`crates/core/src/network.rs`) sem mesh. Itens abaixo
+> marcados `[x]` indicam CLI presente, não feature distribuída pronta.
+
+### Fase 1 — MVP
+- [x] Service create/scale/rm/list (single-node)
 - [x] Podman runtime integration
 - [x] Basic CLI
-- [x] Wireguard overlay
+- [~] Cluster init/join multi-node (join manual via ca.pem; sem token-CA)
+- [ ] Wireguard overlay gerenciado (só helpers `wg`/`wg-quick`)
 
-### Fase 2 — Produção (+3 meses)
-- [ ] Raft consensus
-- [ ] mTLS security
-- [ ] Auto-scaling CPU/memory
-- [ ] Logs streaming
-- [ ] Health checks + restart
+### Fase 2 — Produção
+- [~] Raft consensus (só membership openraft; app fora do Raft)
+- [~] mTLS (API/Raft com PEM manual; join usa mTLS, sem downgrade)
+- [x] Auto-scaling CPU/memory (loop 30s, sem RPS)
+- [x] Logs streaming (`logs --follow`)
+- [x] Health checks + restart
 
-### Fase 3 — Avançado (+3 meses)
+### Fase 3 — Avançado
 - [ ] Auto-scaling request rate
-- [ ] Secrets management
-- [ ] Rolling updates
+- [x] Secrets management (vault AES-GCM + Argon2id, `secret:` em env)
+- [x] Rolling updates (`service update --image`)
 - [ ] Drain/rebalance
-- [ ] Web dashboard
+- [x] Web dashboard (embaixada em `crates/api/src/dashboard/`)
 
-### Fase 4 — Maturidade (+3 meses)
-- [ ] Predictive scaling (ONNX)
+### Fase 4 — Maturidade
+- [ ] Predictive scaling (só regressão linear local, sem ONNX)
 - [ ] WASM plugins
 - [ ] Kubernetes-compatible API
-- [ ] Prometheus metrics
+- [~] Prometheus metrics (só 3 gauges em `/metrics`)
 - [ ] Helm charts?

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::crypto;
+use crate::error::SparrowError;
 
 /// Vault manages encryption keys and secret operations.
 /// Key sourced from: SPARROW_VAULT_KEY env var > vault.key file > init()
@@ -63,32 +64,36 @@ impl Vault {
 }
 
 /// Resolves environment variable secrets of the form `secret:name` by decrypting them using the vault.
+///
+/// Returns `Err` when a referenced secret is missing or undecryptable — callers
+/// MUST propagate instead of booting containers with empty credentials.
+/// Plain (non-`secret:`) vars resolve without touching the vault.
 pub fn resolve_secrets(
     env_vars: &[sparrow_proto::EnvVar],
     config_dir: &Path,
     state: &crate::state::StateStore,
-) -> Vec<(String, String)> {
-    let vault = Vault::open(config_dir).ok();
+) -> Result<Vec<(String, String)>, SparrowError> {
+    if !env_vars.iter().any(|e| e.value.starts_with("secret:")) {
+        return Ok(env_vars
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect());
+    }
+    let vault = Vault::open(config_dir).map_err(|e| SparrowError::VaultError(e.to_string()))?;
     env_vars
         .iter()
         .map(|e| {
-            if e.value.starts_with("secret:") {
-                let name = e.value.strip_prefix("secret:").unwrap_or(&e.value);
-                if let Some(ref v) = vault {
-                    if let Ok(Some(encrypted)) = state.get_secret(name) {
-                        if let Some(decrypted) = v.decrypt(&encrypted) {
-                            return (e.key.clone(), decrypted);
-                        }
-                    }
-                }
-                tracing::warn!(
-                    "Failed to decrypt secret '{}' for env var '{}'",
-                    name,
-                    e.key
-                );
-                (e.key.clone(), String::new())
+            if let Some(name) = e.value.strip_prefix("secret:") {
+                let encrypted = state
+                    .get_secret(name)
+                    .map_err(|e| SparrowError::Internal(e.to_string()))?
+                    .ok_or_else(|| SparrowError::SecretNotFound(name.to_string()))?;
+                let decrypted = vault.decrypt(&encrypted).ok_or_else(|| {
+                    SparrowError::VaultError(format!("Failed to decrypt secret '{name}'"))
+                })?;
+                Ok((e.key.clone(), decrypted))
             } else {
-                (e.key.clone(), e.value.clone())
+                Ok((e.key.clone(), e.value.clone()))
             }
         })
         .collect()
@@ -147,7 +152,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_secrets(&env_vars, dir.path(), &state);
+        let resolved = resolve_secrets(&env_vars, dir.path(), &state).unwrap();
         assert_eq!(resolved.len(), 2);
         assert_eq!(
             resolved[0],
@@ -156,6 +161,52 @@ mod tests {
         assert_eq!(
             resolved[1],
             ("SECRET_VAR".to_string(), "superpassword".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_secrets_missing_fails() {
+        let dir = TempDir::new().unwrap();
+        Vault::init(dir.path()).unwrap();
+        let db = dir.path().join("test.db");
+        let state = crate::state::StateStore::new(db.to_str().unwrap()).unwrap();
+        let env_vars = vec![sparrow_proto::EnvVar {
+            key: "SECRET_VAR".to_string(),
+            value: "secret:db/missing".to_string(),
+        }];
+        let err = resolve_secrets(&env_vars, dir.path(), &state).unwrap_err();
+        assert!(matches!(err, crate::error::SparrowError::SecretNotFound(_)));
+    }
+
+    #[test]
+    fn test_resolve_secrets_corrupt_fails() {
+        let dir = TempDir::new().unwrap();
+        Vault::init(dir.path()).unwrap();
+        let db = dir.path().join("test.db");
+        let state = crate::state::StateStore::new(db.to_str().unwrap()).unwrap();
+        state.set_secret("db/bad", "not-valid-base64!!!").unwrap();
+        let env_vars = vec![sparrow_proto::EnvVar {
+            key: "SECRET_VAR".to_string(),
+            value: "secret:db/bad".to_string(),
+        }];
+        let err = resolve_secrets(&env_vars, dir.path(), &state).unwrap_err();
+        assert!(matches!(err, crate::error::SparrowError::VaultError(_)));
+    }
+
+    #[test]
+    fn test_resolve_secrets_plain_without_vault() {
+        // No vault.key in dir, but no secret: refs either — must succeed.
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("test.db");
+        let state = crate::state::StateStore::new(db.to_str().unwrap()).unwrap();
+        let env_vars = vec![sparrow_proto::EnvVar {
+            key: "PLAIN_VAR".to_string(),
+            value: "plainvalue".to_string(),
+        }];
+        let resolved = resolve_secrets(&env_vars, dir.path(), &state).unwrap();
+        assert_eq!(
+            resolved,
+            vec![("PLAIN_VAR".to_string(), "plainvalue".to_string())]
         );
     }
 }

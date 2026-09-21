@@ -288,8 +288,9 @@ impl PodmanRuntime {
         Ok(containers)
     }
 
-    /// Get stats (CPU, memory) for a container
-    pub async fn stats(&self, name: &str) -> anyhow::Result<(f64, u64)> {
+    /// Get stats (CPU, memory) for a container.
+    /// Returns `(cpu_percent, mem_used_bytes, mem_limit_bytes)`.
+    pub async fn stats(&self, name: &str) -> anyhow::Result<(f64, u64, u64)> {
         let output = tokio::process::Command::new("podman")
             .args([
                 "stats",
@@ -302,7 +303,7 @@ impl PodmanRuntime {
             .await?;
 
         if !output.status.success() {
-            return Ok((0.0, 0));
+            return Ok((0.0, 0, 0));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -313,10 +314,10 @@ impl PodmanRuntime {
             .and_then(|s| s.trim_end_matches('%').parse::<f64>().ok())
             .unwrap_or(0.0);
 
-        let mem_str = parts.get(1).unwrap_or(&"0B");
-        let mem = parse_memory(mem_str).unwrap_or(0);
+        // MemUsage format: "123.4MB / 1.0GB" (used / limit).
+        let (mem_used, mem_limit) = parts.get(1).map(|s| parse_mem_usage(s)).unwrap_or((0, 0));
 
-        Ok((cpu, mem))
+        Ok((cpu, mem_used, mem_limit))
     }
 
     /// Get the internal IP address of a running container via podman inspect.
@@ -343,10 +344,17 @@ impl PodmanRuntime {
     }
 }
 
-fn parse_memory(s: &str) -> Option<u64> {
-    // Format: "123.4MB / 1.0GB"
-    let part = s.split('/').next()?.trim();
-    let (num, unit) = parse_number_unit(part)?;
+/// Parse `podman stats` MemUsage (`"123.4MB / 1.0GB"`) into
+/// `(used_bytes, limit_bytes)`. Missing/unknown sides become 0.
+fn parse_mem_usage(s: &str) -> (u64, u64) {
+    let mut sides = s.split('/');
+    let used = sides.next().and_then(parse_sized).unwrap_or(0);
+    let limit = sides.next().and_then(parse_sized).unwrap_or(0);
+    (used, limit)
+}
+
+fn parse_sized(s: &str) -> Option<u64> {
+    let (num, unit) = parse_number_unit(s.trim())?;
 
     let bytes = match unit.as_str() {
         "B" => num as u64,

@@ -366,6 +366,21 @@ impl StateStore {
 
         Ok(())
     }
+    /// Idempotent create used by the Raft applier: replays of the same
+    /// committed entry converge instead of failing on UNIQUE(name).
+    pub fn upsert_service(&self, spec: &ServiceSpec) -> anyhow::Result<()> {
+        if self.get_service(&spec.id)?.is_some() {
+            return Ok(());
+        }
+        if self.get_service(&spec.name)?.is_some() {
+            let existing = self.get_service(&spec.name)?.unwrap();
+            // Same logical service under a different id (e.g. re-created):
+            // converge on desired state rather than duplicating.
+            self.update_replicas(&existing.id, spec.desired_replicas)?;
+            return Ok(());
+        }
+        self.create_service(spec)
+    }
 
     pub fn list_services(&self) -> anyhow::Result<Vec<ServiceSpec>> {
         let conn = self.conn()?;
@@ -663,6 +678,16 @@ impl StateStore {
         Ok(rows.next().transpose()?)
     }
 
+    /// Delete an autoscale policy. Returns true if one existed.
+    pub fn delete_autoscale(&self, service_id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            "DELETE FROM autoscale_config WHERE service_id = ?1",
+            params![service_id],
+        )?;
+        Ok(affected > 0)
+    }
+
     pub fn record_autoscale_event(
         &self,
         service_id: &str,
@@ -948,7 +973,8 @@ impl StateStore {
         Ok(map)
     }
 
-    /// Record autoscale metric data point for predictive analysis.
+    /// `service_id` MUST be `ServiceSpec::id` (`svc_*`), not the service name:
+    /// `autoscale_metrics.service_id` has `REFERENCES services(id) ON DELETE CASCADE`.
     pub fn record_autoscale_metric(
         &self,
         service_id: &str,

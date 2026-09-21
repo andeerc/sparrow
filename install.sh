@@ -4,20 +4,19 @@ set -euo pipefail
 # ───────────────────────────────────────────────────────────────────
 # Sparrow Installer
 # Uso: bash install.sh [--systemd] [--user <user>]
-#   curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash
-#   curl -sfL https://codeberg.org/andeerc/sparrow/raw/main/install.sh | bash -s -- --systemd
+#   curl -sfL https://raw.githubusercontent.com/andeerc/sparrow/main/install.sh | bash
+#   curl -sfL https://raw.githubusercontent.com/andeerc/sparrow/main/install.sh | bash -s -- --systemd
 # ───────────────────────────────────────────────────────────────────
 
 VERSION="${SPARROW_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
-  VERSION=$(curl -sfL "https://codeberg.org/api/v1/repos/andeerc/sparrow/releases/latest" 2>/dev/null \
-    | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4 | sed 's/^v//')
+  VERSION=$(curl -sfL -H "Accept: application/vnd.github+json" -H "User-Agent: sparrow-installer" "https://api.github.com/repos/andeerc/sparrow/releases/latest" 2>/dev/null \
 fi
 VERSION="${VERSION:-0.9.6}"
 ARCH="$(uname -m)"
 OS="linux"
-BIN_URL="https://codeberg.org/andeerc/sparrow/releases/download/v${VERSION}/sparrow-v${VERSION}-${ARCH}-${OS}"
-REPO="https://codeberg.org/andeerc/sparrow"
+BIN_URL="https://github.com/andeerc/sparrow/releases/download/v${VERSION}/sparrow-v${VERSION}-${ARCH}-${OS}"
+REPO="https://github.com/andeerc/sparrow"
 SPARROW_BIN="/usr/local/bin/sparrow"
 SPARROW_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/sparrow"
 SPARROW_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sparrow"

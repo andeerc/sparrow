@@ -1,6 +1,6 @@
 [Unit]
 Description=Sparrow - Container orchestrator (API + Dashboard + Proxy)
-Documentation=https://codeberg.org/andeerc/sparrow
+Documentation=https://github.com/andeerc/sparrow
 After=network.target podman.socket
 Wants=podman.socket
 

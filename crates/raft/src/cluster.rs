@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 use crate::network::{NetworkFactory, TlsConfig};
 use crate::storage::{StoredRaftLog, StoredStateMachine, TypeConfig};
+use crate::types::{RaftRequest, RaftResponse};
 
 pub type RaftNode = Raft<TypeConfig, StoredStateMachine>;
 
@@ -28,6 +29,7 @@ pub struct RaftCluster {
     pub listen_addr: String,
     data_dir: String,
     tls: Option<TlsConfig>,
+    applier_source: tokio::sync::Mutex<Option<std::sync::Arc<StoredStateMachine>>>,
 }
 
 impl RaftCluster {
@@ -38,6 +40,7 @@ impl RaftCluster {
             listen_addr: listen_addr.to_string(),
             data_dir: data_dir.to_string(),
             tls: None,
+            applier_source: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -48,6 +51,7 @@ impl RaftCluster {
             listen_addr: listen_addr.to_string(),
             data_dir: data_dir.to_string(),
             tls: Some(tls),
+            applier_source: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -70,24 +74,30 @@ impl RaftCluster {
         // Ensure data_dir exists
         std::fs::create_dir_all(&self.data_dir)?;
 
-        // Clean up stale Raft databases from previous failed init attempts.
-        // openraft's initialize() requires vote == None, but a prior failed
-        // init leaves a committed vote in the DB, blocking subsequent attempts.
-        for suffix in ["log", "sm"] {
-            let p = self.raft_db_path(suffix);
-            let path = std::path::Path::new(&p);
-            if path.exists() {
-                std::fs::remove_file(path)?;
-            }
+        // NEVER wipe Raft DBs blindly: deleting committed vote + state machine
+        // state here creates a divergent leader (split-brain). Only a fresh
+        // node (no DB files at all) may initialize; a re-init of an existing
+        // node must go through an explicit reset path, not init.
+        let log_path = self.raft_db_path("log");
+        let sm_path = self.raft_db_path("sm");
+        if std::path::Path::new(&log_path).exists() || std::path::Path::new(&sm_path).exists() {
+            anyhow::bail!(
+                "Raft DBs already exist at {log_path} / {sm_path}: refusing init to avoid split-brain. \
+                 Delete them explicitly to reset this node, or join an existing cluster instead."
+            );
         }
-
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
-        let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"), &self.data_dir)?;
+        let state_machine = std::sync::Arc::new(StoredStateMachine::new(
+            &self.raft_db_path("sm"),
+            &self.data_dir,
+        )?);
+        *self.applier_source.lock().await = Some(std::sync::Arc::clone(&state_machine));
+        let sm_for_raft = (*state_machine).clone();
         let network = NetworkFactory {
             tls: self.tls.clone(),
         };
 
-        let raft = RaftNode::new(self.node_id, config, network, log_store, state_machine)
+        let raft = RaftNode::new(self.node_id, config, network, log_store, sm_for_raft)
             .await
             .map_err(|e| anyhow::anyhow!("Raft::new failed: {e}"))?;
 
@@ -120,18 +130,37 @@ impl RaftCluster {
         std::fs::create_dir_all(&self.data_dir)?;
 
         let log_store = StoredRaftLog::new(&self.raft_db_path("log"))?;
-        let state_machine = StoredStateMachine::new(&self.raft_db_path("sm"), &self.data_dir)?;
+        let state_machine = std::sync::Arc::new(StoredStateMachine::new(
+            &self.raft_db_path("sm"),
+            &self.data_dir,
+        )?);
+        *self.applier_source.lock().await = Some(std::sync::Arc::clone(&state_machine));
+        let sm_for_raft = (*state_machine).clone();
         let network = NetworkFactory {
             tls: self.tls.clone(),
         };
 
-        let raft = RaftNode::new(self.node_id, config, network, log_store, state_machine)
+        let raft = RaftNode::new(self.node_id, config, network, log_store, sm_for_raft)
             .await
             .map_err(|e| anyhow::anyhow!("Raft::new failed: {e}"))?;
 
-        // Register as learner with the leader
-        let client = reqwest::Client::new();
-        let join_url = format!("http://{}/raft/add_learner", leader_addr);
+        // Register as learner with the leader. When this node has TLS material,
+        // use the same mTLS client as Raft replication so join registration
+        // cannot silently downgrade to plaintext.
+        let client = match &self.tls {
+            Some(tls) => crate::mtls_client_from_pem(
+                &String::from_utf8_lossy(&tls.ca),
+                &String::from_utf8_lossy(&tls.cert),
+                &String::from_utf8_lossy(&tls.key),
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "mTLS client build failed, join registration will fail closed");
+                reqwest::Client::new()
+            }),
+            None => reqwest::Client::new(),
+        };
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        let join_url = format!("{scheme}://{leader_addr}/raft/add_learner");
         let resp = client
             .post(&join_url)
             .json(&serde_json::json!({
@@ -179,6 +208,55 @@ impl RaftCluster {
             }
             None => anyhow::bail!("Raft not initialized"),
         }
+    }
+    /// Replicate an application write through Raft consensus.
+    /// Returns the client response once committed + applied (success=false
+    /// with an error string when the state machine rejected the entry).
+    /// On a non-leader this errors — callers fail over to the leader
+    /// instead of writing SQLite directly.
+    pub async fn propose(&self, req: RaftRequest) -> anyhow::Result<RaftResponse> {
+        let guard = self.raft.read().await;
+        match guard.as_ref() {
+            Some(raft) => {
+                let resp = raft
+                    .client_write(req)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("client_write failed: {e}"))?;
+                Ok(resp.response().clone())
+            }
+            None => anyhow::bail!("Raft not initialized"),
+        }
+    }
+
+    /// Promote a caught-up learner to full voter via joint-consensus
+    /// membership change. Without this, `add_learner` nodes never vote and
+    /// the `(N-1)/2` fault-tolerance math never improves.
+    pub async fn promote_learner(&self, node_ids: &[u64]) -> anyhow::Result<()> {
+        use std::collections::BTreeSet;
+        let guard = self.raft.read().await;
+        match guard.as_ref() {
+            Some(raft) => {
+                // AddVoterIds upgrades existing learners to voters — the only
+                // safe promotion path (learners must already be present).
+                let voters: BTreeSet<u64> = node_ids.iter().copied().collect();
+                raft.change_membership(openraft::ChangeMembers::AddVoterIds(voters.clone()), true)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("change_membership failed: {e}"))?;
+                tracing::info!(?voters, "Membership changed, learner(s) promoted to voter");
+                Ok(())
+            }
+            None => anyhow::bail!("Raft not initialized"),
+        }
+    }
+
+    /// Subscribe to committed [`RaftRequest`]s applied by the local state
+    /// machine. `None` when Raft is not running on this node (single-node
+    /// mode) — callers then write `StateStore` directly.
+    pub async fn subscribe_applied(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<crate::types::RaftRequest>> {
+        let guard = self.applier_source.lock().await;
+        guard.as_ref().map(|sm| sm.subscribe_applied())
     }
 
     pub async fn current_leader(&self) -> Option<u64> {
@@ -287,6 +365,27 @@ mod tests {
     async fn test_add_learner_uninitialized() {
         let c = RaftCluster::new(1, "0.0.0.0:7443", "/tmp/sparrow-test-learner");
         let result = c.add_learner(2, "10.0.0.2:7443").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_propose_uninitialized() {
+        let c = RaftCluster::new(1, "0.0.0.0:7443", "/tmp/sparrow-test-propose");
+        let req = RaftRequest {
+            service_id: "svc_x".to_string(),
+            operation: "scale".to_string(),
+            payload: vec![],
+        };
+        let result = c.propose(req).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not initialized"));
+    }
+
+    #[tokio::test]
+    async fn test_promote_uninitialized() {
+        let c = RaftCluster::new(1, "0.0.0.0:7443", "/tmp/sparrow-test-promote");
+        let result = c.promote_learner(&[2]).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not initialized"));
     }

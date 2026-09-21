@@ -1,6 +1,6 @@
 [Unit]
 Description=Sparrow MCP Server
-Documentation=https://codeberg.org/andeerc/sparrow
+Documentation=https://github.com/andeerc/sparrow
 After=network.target sparrow.service
 BindsTo=sparrow.service
 

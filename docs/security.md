@@ -33,21 +33,23 @@ Toda comunicação entre nós do cluster usa TLS mútuo:
 ```bash
 # Líder gera CA auto-assinada e seu certificado
 sparrow cluster init
-# → /etc/sparrow/certs/ca.pem
-# → /etc/sparrow/certs/server.pem
-# → /etc/sparrow/certs/server-key.pem
+# → <data_dir>/certs/ca.pem
+# → <data_dir>/certs/node.pem
+# → <data_dir>/certs/node-key.pem
 
-# Workers recebem token e CA
-sparrow cluster join leader-addr:7443 --token <token>
-# → gera certificado próprio assinado pela CA
-# → conexão mTLS estabelecida
+# Workers: COPIE ca.pem do líder primeiro (o token ainda não carrega a CA —
+# `src/main.rs` recusa join com token fresco sem ca.pem local)
+# → <data_dir>/certs/ca.pem + node.pem + node-key.pem
+sparrow cluster join leader-addr:7443 --token <qualquer-sem-ca-local>
+# → registra como learner via mTLS (https, `RaftCluster::join`)
+# → ouvinte Raft mTLS próprio; processo permanece vivo (Ctrl+C sai)
 ```
 
 **Stack TLS:**
 - `rustls` (Rust puro, sem OpenSSL)
-- Curva: Ed25519 ou P-256
-- Cipher: TLS 1.3 only
-- Rotação automática de certificados a cada 30 dias
+- Curvas do `rcgen` (ECDSA P-256); sem Ed25519 no código atual
+- TLS 1.2+ via rustls (não há pinning "TLS 1.3 only" no código)
+- Sem rotação automática no código (reemitir via `generate_node_cert`)
 
 ## Container Security (Podman Rootless)
 

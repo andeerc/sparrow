@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(cfg.cluster.data_dir, "/var/lib/sparrow");
         assert_eq!(cfg.cluster.tls_ca, None);
         assert_eq!(cfg.runtime.backend, "podman");
-        assert_eq!(cfg.runtime.rootless, true);
+        assert!(cfg.runtime.rootless);
         assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.logging.format, "plain");
         assert_eq!(cfg.logging.file, None);

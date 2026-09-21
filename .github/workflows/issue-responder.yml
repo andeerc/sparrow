@@ -6,30 +6,26 @@ on:
   issues:
     types: [opened]
 
+permissions:
+  issues: write
+
 jobs:
   respond:
     if: |
       (github.event_name == 'issues' && contains(github.event.issue.body, '@opencode')) ||
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@opencode'))
-    runs-on: docker
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: |
-          git init -q
-          git remote add origin https://andeerc:${BOT_TOKEN}@codeberg.org/andeerc/sparrow.git
-          git fetch origin --depth 1 main
-          git checkout FETCH_HEAD
+        uses: actions/checkout@v4
 
       - name: Install Node.js
-        run: |
-          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-          apt-get install -y nodejs
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Install OpenCode
-        run: |
-          npm install -g @opencode-ai/cli
+        run: npm install -g @opencode-ai/cli
 
       - name: Prepare prompt
         id: prompt
@@ -61,19 +57,15 @@ jobs:
 
       - name: Post comment
         if: env.RESPONSE != ''
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: |
-          BODY=$(cat <<'EOF'
-          ## 🤖 Resposta do @opencode
-
-          ${{ env.RESPONSE }}
-
-          ---
-          *Gerado automaticamente pelo OpenCode CI. Para evitar respostas automáticas, não mencione @opencode.*
-          EOF
-          )
-          curl -s -X POST "https://codeberg.org/api/v1/repos/andeerc/sparrow/issues/${{ env.ISSUE_NUMBER }}/comments" \
-            -H "Authorization: token ${BOT_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg body "$BODY" '{body: $body}')"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const response = process.env.RESPONSE || '';
+            const body = `## 🤖 Resposta do @opencode\n\n${response}\n\n---\n*Gerado automaticamente pelo OpenCode CI. Para evitar respostas automáticas, não mencione @opencode.*`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              body,
+            });

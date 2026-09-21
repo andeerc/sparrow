@@ -157,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
             handle_cluster(
                 action,
                 &state,
+                &runtime,
                 &config,
                 &data_dir,
                 &mut cluster_state,
@@ -227,102 +228,36 @@ async fn main() -> anyhow::Result<()> {
 
         // ── Deploy (Fase 3) ──
         Command::Deploy { file } => {
+            // Compose subset first when the doc has top-level services:, else manifest.
+            let is_compose = std::fs::read_to_string(&file)
+                .map(|c| c.lines().any(|l| l.trim() == "services:"))
+                .unwrap_or(false);
+            if is_compose {
+                match sparrow_core::deploy::DeployManifest::from_compose_file(&file) {
+                    Ok(ms) => {
+                        println!("📄 Compose file detected: {} service(s)", ms.len());
+                        for manifest in &ms {
+                            let spec = manifest.to_service_spec();
+                            if let Err(e) =
+                                boot_spec(&state, &runtime, &data_dir, podman_ok, &spec).await
+                            {
+                                error!("❌ Deploy of '{}' failed: {e}", spec.name);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        error!("❌ Deploy failed: {e}");
+                        return Ok(());
+                    }
+                }
+            }
             match sparrow_core::deploy::DeployManifest::from_file(&file) {
                 Ok(manifest) => {
                     let spec = manifest.to_service_spec();
-                    println!(
-                        "📦 Deploying '{}' ({} replicas of {})...",
-                        spec.name, spec.desired_replicas, spec.image
-                    );
-
-                    if !podman_ok {
-                        error!("❌ Podman not available (verify Podman is installed)");
-                        return Ok(());
+                    if let Err(e) = boot_spec(&state, &runtime, &data_dir, podman_ok, &spec).await {
+                        error!("❌ Deploy failed: {e}");
                     }
-
-                    if spec.desired_replicas > 1 && !spec.ports.is_empty() {
-                        let host_ports: Vec<String> =
-                            spec.ports.iter().map(|p| p.published.to_string()).collect();
-                        eprintln!(
-                            "❌ Cannot expose host ports [{ports}] with {replicas} replicas in deploy.\n\
-                               Each replica would try to bind the same port — only 1 would succeed.\n\n\
-                               Use replicas: 1 for direct port access, or remove ports and use --domain\n\
-                               with sparrow service create for proxy-based routing.",
-                            ports = host_ports.join(", "), replicas = spec.desired_replicas
-                        );
-                        return Ok(());
-                    }
-
-                    // Persist to state store
-                    state.create_service(&spec)?;
-                    println!("📦 Service '{}' ({}) created", spec.name, spec.id);
-
-                    // Run containers
-                    let mut success = 0u32;
-                    let ports_base = &spec.ports;
-                    let env_base = &spec.env;
-                    for i in 1..=spec.desired_replicas {
-                        let cname = format!("{}-{}", spec.name, i);
-                        let ports: Vec<PortMapping> =
-                            if i == 1 { ports_base.clone() } else { vec![] };
-                        let env_refs =
-                            sparrow_core::vault::resolve_secrets(env_base, &data_dir, &state);
-                        match runtime
-                            .run_container(
-                                &cname,
-                                &spec.image,
-                                &ports,
-                                &env_refs,
-                                &std::collections::HashMap::new(),
-                                &spec.volumes,
-                                &spec.networks,
-                            )
-                            .await
-                        {
-                            Ok(cid) => {
-                                state.record_container_with_ip(
-                                    &cname,
-                                    &spec.id,
-                                    &spec.image,
-                                    i,
-                                    "Running",
-                                )?;
-                                println!("  ✅ {cname} -> {cid:.12}");
-                                success += 1;
-                            }
-                            Err(e) => {
-                                state.record_container_with_ip(
-                                    &cname,
-                                    &spec.id,
-                                    &spec.image,
-                                    i,
-                                    "Failed",
-                                )?;
-                                eprintln!("  ❌ {cname}: {e}");
-                            }
-                        }
-                    }
-
-                    // Configure autoscale if specified
-                    if let Some(as_config) = &spec.autoscaling {
-                        state.set_autoscale(&spec.id, as_config, false)?;
-                        println!(
-                            "📊 Autoscale configured: min={} max={} cpu={}% mem={}%",
-                            as_config.min_replicas,
-                            as_config.max_replicas,
-                            as_config
-                                .cpu_target_percent
-                                .map_or("-".to_string(), |v| v.to_string()),
-                            as_config
-                                .memory_target_percent
-                                .map_or("-".to_string(), |v| v.to_string())
-                        );
-                    }
-
-                    println!(
-                        "🎯 Deploy complete: {}/{} replicas running",
-                        success, spec.desired_replicas
-                    );
                 }
                 Err(e) => error!("❌ Deploy failed: {e}"),
             }
@@ -432,6 +367,91 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Boot one resolved ServiceSpec: guard ports, persist, run replicas, wire autoscale.
+/// Shared by manifest deploy and compose deploy (one call per service).
+async fn boot_spec(
+    state: &std::sync::Arc<StateStore>,
+    runtime: &std::sync::Arc<PodmanRuntime>,
+    data_dir: &std::path::Path,
+    podman_ok: bool,
+    spec: &sparrow_proto::ServiceSpec,
+) -> anyhow::Result<()> {
+    use sparrow_proto::PortMapping;
+    println!(
+        "📦 Deploying '{}' ({} replicas of {})...",
+        spec.name, spec.desired_replicas, spec.image
+    );
+    if !podman_ok {
+        anyhow::bail!("Podman not available (verify Podman is installed)");
+    }
+    if spec.desired_replicas > 1 && !spec.ports.is_empty() {
+        let host_ports: Vec<String> = spec.ports.iter().map(|p| p.published.to_string()).collect();
+        anyhow::bail!(
+            "Cannot expose host ports [{}] with {} replicas in deploy. Each replica would try to bind the same port.",
+            host_ports.join(", "),
+            spec.desired_replicas
+        );
+    }
+    state.create_service(spec)?;
+    println!("📦 Service '{}' ({}) created", spec.name, spec.id);
+    let mut success = 0u32;
+    let ports_base = &spec.ports;
+    let env_base = &spec.env;
+    for i in 1..=spec.desired_replicas {
+        let cname = format!("{}-{}", spec.name, i);
+        let ports: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
+        let env_refs = match sparrow_core::vault::resolve_secrets(env_base, data_dir, state) {
+            Ok(env) => env,
+            Err(e) => {
+                eprintln!("  ❌ {cname}: secret resolution failed: {e}");
+                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Failed")?;
+                continue;
+            }
+        };
+        match runtime
+            .run_container(
+                &cname,
+                &spec.image,
+                &ports,
+                &env_refs,
+                &std::collections::HashMap::new(),
+                &spec.volumes,
+                &spec.networks,
+            )
+            .await
+        {
+            Ok(cid) => {
+                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Running")?;
+                println!("  ✅ {cname} -> {cid:.12}");
+                success += 1;
+            }
+            Err(e) => {
+                state.record_container_with_ip(&cname, &spec.id, &spec.image, i, "Failed")?;
+                eprintln!("  ❌ {cname}: {e}");
+            }
+        }
+    }
+    if let Some(as_config) = &spec.autoscaling {
+        state.set_autoscale(&spec.id, as_config, false)?;
+        println!(
+            "📊 Autoscale configured: min={} max={} cpu={}% mem={}%",
+            as_config.min_replicas,
+            as_config.max_replicas,
+            as_config
+                .cpu_target_percent
+                .map_or("-".to_string(), |v| v.to_string()),
+            as_config
+                .memory_target_percent
+                .map_or("-".to_string(), |v| v.to_string())
+        );
+    }
+    println!(
+        "🎯 Deploy complete: {}/{} replicas running",
+        success, spec.desired_replicas
+    );
     Ok(())
 }
 
@@ -580,6 +600,7 @@ async fn handle_config(action: &ConfigAction, config_path: &Path) -> anyhow::Res
 async fn handle_cluster(
     action: ClusterAction,
     state: &Arc<StateStore>,
+    runtime: &Arc<PodmanRuntime>,
     config: &SparrowConfig,
     data_dir: &Path,
     cluster_state: &mut Option<sparrow_api::SharedAppState>,
@@ -661,8 +682,7 @@ async fn handle_cluster(
                 vault_key.clone(),
                 Some(Arc::clone(state)),
             );
-
-            // Start mTLS Raft listener on raft_port
+            sparrow_api::set_runtime(&app_state, runtime.clone());
             let raft_port = config.cluster.raft_port.unwrap_or(7444);
             let raft_addr = format!("0.0.0.0:{raft_port}");
             let mtls_state = app_state.clone();
@@ -721,6 +741,36 @@ async fn handle_cluster(
                 }
             }
         }
+        ClusterAction::JoinToken { node_id, addr } => {
+            // Leader-side: mint a join token embedding CA cert + key.
+            // Requires the leader's certs on disk (cluster init first).
+            let cert_dir = data_dir.join("certs");
+            let ca_pem = std::fs::read_to_string(cert_dir.join("ca.pem")).map_err(|_| {
+                anyhow::anyhow!(
+                    "no CA at {}/certs/ca.pem — run 'sparrow cluster init' first",
+                    data_dir.display()
+                )
+            })?;
+            let ca_key_pem =
+                std::fs::read_to_string(cert_dir.join("ca-key.pem")).map_err(|_| {
+                    anyhow::anyhow!(
+                        "no CA key at {}/certs/ca-key.pem — cannot mint join tokens",
+                        data_dir.display()
+                    )
+                })?;
+            // node_id 1 is the founder; refuse to mint a colliding token.
+            if node_id <= 1 {
+                anyhow::bail!("node_id must be >= 2 (1 is the founder)");
+            }
+            let token = sparrow_raft::mint_join_token(node_id, &ca_pem, &ca_key_pem);
+            println!("🔑 Join token for node {node_id} (addr {addr}):");
+            println!("{token}");
+            println!();
+            println!("On the new node, run:");
+            println!("  sparrow cluster join {addr} --token <token-acima>");
+            println!();
+            println!("⚠️  The token embeds the CA key — transmit over a secure channel.");
+        }
         ClusterAction::Join { addr, token } => {
             println!("🔗 Joining cluster at {addr} with token {token}...");
             let cert_dir = data_dir.join("certs");
@@ -731,7 +781,6 @@ async fn handle_cluster(
                 let ca_path = cert_dir.join("ca.pem");
                 let node_cert_path = cert_dir.join("node.pem");
                 let node_key_path = cert_dir.join("node-key.pem");
-                let ca_key_path = cert_dir.join("ca-key.pem");
 
                 if ca_path.exists() && node_cert_path.exists() && node_key_path.exists() {
                     (
@@ -740,22 +789,27 @@ async fn handle_cluster(
                         std::fs::read_to_string(&node_key_path)?,
                     )
                 } else {
-                    // For now generate a self-signed cert; in production the join
-                    // token would carry the CA cert and a one-time secret
-                    let (ca_pem_str, ca_key_pem, ca_cert, ca_key) =
-                        sparrow_raft::generate_ca("sparrow-join")?;
-                    let node_name = format!("node-{}", token.chars().take(4).collect::<String>());
-                    let bundle = sparrow_raft::generate_node_cert(
-                        &ca_cert,
-                        &ca_key,
-                        &node_name,
-                        "0.0.0.0:7443",
+                    // Token carries the leader CA (cert + key): parse it, reload the
+                    // CA objects, and mint this node's cert locally. The leader
+                    // trusts it because it chains to the same CA.
+
+                    let (token_node_id, ca_pem_str, ca_key_pem) =
+                        sparrow_raft::parse_join_token(&token).map_err(|e| {
+                            anyhow::anyhow!(
+                                "{e} — copy a fresh 'cluster join-token' from the leader"
+                            )
+                        })?;
+                    let (bundle, _id) = sparrow_raft::mint_node_cert_from_ca_pem(
                         &ca_pem_str,
+                        &ca_key_pem,
+                        &format!("node-{token_node_id}"),
+                        "0.0.0.0:7443",
                     )?;
                     std::fs::write(&ca_path, &bundle.ca_pem)?;
                     std::fs::write(&node_cert_path, &bundle.cert_pem)?;
                     std::fs::write(&node_key_path, &bundle.key_pem)?;
-                    std::fs::write(ca_key_path, &ca_key_pem)?;
+                    // Persist the token node id so the Raft id matches the cert name.
+                    std::fs::write(cert_dir.join("node-id"), token_node_id.to_string())?;
                     (bundle.ca_pem, bundle.cert_pem, bundle.key_pem)
                 }
             };
@@ -765,8 +819,20 @@ async fn handle_cluster(
                 cert: cert_pem.as_bytes().to_vec(),
                 key: key_pem.as_bytes().to_vec(),
             };
+            // Raft id comes from the join token (node-id file) when present,
+            // else the legacy default 2 for pre-token joins.
+            let raft_id: u64 = cert_dir
+                .join("node-id")
+                .exists()
+                .then(|| {
+                    std::fs::read_to_string(cert_dir.join("node-id"))
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok())
+                })
+                .flatten()
+                .unwrap_or(2);
             let raft_cluster = std::sync::Arc::new(sparrow_raft::RaftCluster::with_tls(
-                2,
+                raft_id,
                 "0.0.0.0:7443",
                 tls,
                 &raft_data_dir,
@@ -785,6 +851,7 @@ async fn handle_cluster(
                 vault_key.clone(),
                 Some(Arc::clone(state)),
             );
+            sparrow_api::set_runtime(&app_state, runtime.clone());
             let mtls_state = app_state.clone();
             let mtls_ca = ca_pem.clone();
             let mtls_cert = cert_pem.clone();
@@ -970,7 +1037,22 @@ async fn handle_service(
             for i in 1..=replicas {
                 let container_name = format!("{}-{}", name, i);
                 let port_refs: Vec<PortMapping> = if i == 1 { ports_base.clone() } else { vec![] };
-                let env_refs = sparrow_core::vault::resolve_secrets(&env_base, data_dir, state);
+                let env_refs =
+                    match sparrow_core::vault::resolve_secrets(&env_base, data_dir, state) {
+                        Ok(env) => env,
+                        Err(e) => {
+                            eprintln!("  ❌ {container_name}: secret resolution failed: {e}");
+                            state.record_container(
+                                &container_name,
+                                &spec.id,
+                                &image,
+                                i,
+                                "Failed",
+                                "",
+                            )?;
+                            continue;
+                        }
+                    };
                 let labels = std::collections::HashMap::new();
 
                 match runtime
@@ -1071,10 +1153,10 @@ async fn handle_service(
                     } else {
                         let mut rows: Vec<Vec<String>> = Vec::new();
                         for c in &containers {
-                            let (cpu, mem) = if c.state == ContainerState::Running {
-                                runtime.stats(&c.name).await.unwrap_or((0.0, 0))
+                            let (cpu, mem, _) = if c.state == ContainerState::Running {
+                                runtime.stats(&c.name).await.unwrap_or((0.0, 0, 0))
                             } else {
-                                (0.0, 0)
+                                (0.0, 0, 0)
                             };
                             rows.push(vec![
                                 c.name.clone(),
@@ -1817,6 +1899,11 @@ async fn handle_update(action: UpdateAction) -> anyhow::Result<()> {
                 }
             }
         }
+        UpdateAction::Rollback => {
+            if let Err(e) = update::rollback().await {
+                error!("❌ Rollback failed: {e}");
+            }
+        }
     }
     Ok(())
 }
@@ -1861,7 +1948,13 @@ async fn health_check_loop(
                     }
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
                     let env_refs =
-                        sparrow_core::vault::resolve_secrets(&svc.env, &data_dir, &state);
+                        match sparrow_core::vault::resolve_secrets(&svc.env, &data_dir, &state) {
+                            Ok(env) => env,
+                            Err(e) => {
+                                tracing::error!("Health: secret resolution failed: {e}");
+                                continue;
+                            }
+                        };
                     match runtime
                         .run_container(
                             &c.name,
@@ -1905,7 +1998,13 @@ async fn health_check_loop(
                     let cname = format!("{}-{}", svc.name, i);
                     let port_refs: Vec<PortMapping> = svc.ports.clone();
                     let env_refs =
-                        sparrow_core::vault::resolve_secrets(&svc.env, &data_dir, &state);
+                        match sparrow_core::vault::resolve_secrets(&svc.env, &data_dir, &state) {
+                            Ok(env) => env,
+                            Err(e) => {
+                                tracing::error!("Health: secret resolution failed: {e}");
+                                continue;
+                            }
+                        };
                     match runtime
                         .run_container(
                             &cname,

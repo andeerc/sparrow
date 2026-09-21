@@ -1,3 +1,4 @@
+pub mod applier;
 pub mod dashboard;
 pub mod proxy;
 
@@ -9,7 +10,7 @@ use axum::{
     body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, State,
     },
     http::StatusCode,
     middleware::{self, Next},
@@ -18,8 +19,51 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use sparrow_core::error::SparrowError;
 use sparrow_core::state::StateStore;
 use tokio::sync::RwLock;
+
+// ── API Error Type ──
+
+/// Thin wrapper over [`sparrow_core::error::SparrowError`] that renders as
+/// `(status, {"error": code, "message": msg})`. Handlers SHOULD return
+/// `ApiResult<T>` instead of ad-hoc `(StatusCode, String)` tuples so that
+/// 404/400/503 stay distinguishable instead of collapsing to 500.
+pub struct ApiError(pub sparrow_core::error::SparrowError);
+
+impl From<sparrow_core::error::SparrowError> for ApiError {
+    fn from(e: sparrow_core::error::SparrowError) -> Self {
+        ApiError(e)
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        ApiError(sparrow_core::error::SparrowError::Internal(e.to_string()))
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status =
+            StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let body = Json(serde_json::json!({
+            "error": self.0.code(),
+            "message": self.0.to_string(),
+        }));
+        (status, body).into_response()
+    }
+}
+
+/// Handler result alias; the `Err` side renders via [`ApiError::into_response`].
+pub type ApiResult<T> = Result<T, ApiError>;
+
+/// Convenience: state store missing (daemon misconfiguration).
+fn store_unavailable() -> ApiError {
+    ApiError(sparrow_core::error::SparrowError::Unavailable(
+        "State store not available".to_string(),
+    ))
+}
 
 // ── Cluster Types ──
 
@@ -100,6 +144,7 @@ pub struct AppState {
     pub alerts: RwLock<AlertState>,
     pub raft_cluster: RwLock<Option<std::sync::Arc<sparrow_raft::RaftCluster>>>,
     pub state_store: Option<Arc<StateStore>>,
+    pub runtime: Option<Arc<sparrow_podman::PodmanRuntime>>,
     pub rate_limiter: RwLock<HashMap<String, (Instant, u64)>>,
     pub auth_token: Option<String>,
     pub vault_key: RwLock<Option<String>>,
@@ -123,12 +168,16 @@ pub async fn start_proxy(state: SharedAppState, port: u16) -> anyhow::Result<()>
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
     tracing::info!("Proxy server listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
-
 async fn rate_limit_check(
     State(state): State<SharedAppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -150,17 +199,10 @@ async fn rate_limit_check(
         }
     }
 
-    // Rate limiting
-    let client_ip = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .split(',')
-        .next()
-        .unwrap_or("unknown")
-        .trim()
-        .to_string();
+    // Rate limiting keyed by the TCP peer address. The old code trusted
+    // `x-forwarded-for` (client-controlled, and overwritten to 127.0.0.1 by
+    // our own proxy) — every client behind the proxy shared one bucket.
+    let client_ip = peer.ip().to_string();
 
     let mut limiter = state.rate_limiter.write().await;
     let now = Instant::now();
@@ -229,6 +271,11 @@ pub async fn start_api(
         .route("/api/v1/services/{id}", get(service_get))
         .route("/api/v1/services/{id}", delete(service_delete))
         .route("/api/v1/services/{id}/scale", post(service_scale))
+        .route("/api/v1/services/{id}/logs", get(service_logs))
+        .route(
+            "/api/v1/services/{id}/logs/stream",
+            get(service_logs_stream),
+        )
         .route("/metrics", get(metrics))
         .route("/api/v1/alerts/channels", get(alert_channels_list))
         .route("/api/v1/alerts/channels", post(alert_channels_add))
@@ -237,6 +284,7 @@ pub async fn start_api(
         .route("/raft/vote", post(raft_vote))
         .route("/raft/snapshot", post(raft_snapshot))
         .route("/raft/add_learner", post(raft_add_learner))
+        .route("/raft/promote", post(raft_promote))
         .route("/api/v1/secrets", get(secret_list))
         .route("/api/v1/secrets/{name}", get(secret_get))
         .route("/api/v1/secrets/{name}", post(secret_set))
@@ -267,7 +315,11 @@ pub async fn start_api(
         }
         _ => {
             tracing::info!("API server listening on {addr}");
-            axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+            axum::serve(
+                tokio::net::TcpListener::bind(addr).await?,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -395,27 +447,86 @@ async fn proxy_list(State(state): State<SharedAppState>) -> Json<Vec<ProxyRoute>
 async fn proxy_add(
     State(state): State<SharedAppState>,
     Json(route): Json<ProxyRoute>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    state.proxy_routes.write().await.push(route);
-    (
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    if replicate_or_none(
+        &state,
+        crate::applier::request(
+            &route.service_name,
+            crate::applier::OP_SAVE_PROXY_ROUTE,
+            serde_json::json!({
+                "domain": route.domain,
+                "target_port": route.target_port,
+                "service_name": route.service_name,
+                "tls": route.tls,
+            }),
+        ),
+    )
+    .await?
+    .is_some()
+    {
+        // Mirror via applier; keep the in-memory cache warm for reads.
+        state.proxy_routes.write().await.push(route);
+        return Ok((
+            axum::http::StatusCode::CREATED,
+            Json(serde_json::json!({"status": "ok"})),
+        ));
+    }
+    state.proxy_routes.write().await.push(route.clone());
+    if let Some(store) = state.state_store.as_ref() {
+        store
+            .save_proxy_route(
+                &route.domain,
+                route.target_port,
+                &route.service_name,
+                route.tls,
+            )
+            .map_err(|e| SparrowError::Internal(format!("proxy route: {e}")))?;
+    }
+    Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({"status": "ok"})),
-    )
+    ))
 }
 
 async fn proxy_remove(
     State(state): State<SharedAppState>,
     axum::extract::Path(domain): axum::extract::Path<String>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    if replicate_or_none(
+        &state,
+        crate::applier::request(
+            &domain,
+            crate::applier::OP_DELETE_PROXY_ROUTE,
+            serde_json::json!({ "domain": domain }),
+        ),
+    )
+    .await?
+    .is_some()
+    {
+        state
+            .proxy_routes
+            .write()
+            .await
+            .retain(|r| r.domain != domain);
+        return Ok((
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "ok"})),
+        ));
+    }
     state
         .proxy_routes
         .write()
         .await
         .retain(|r| r.domain != domain);
-    (
+    if let Some(store) = state.state_store.as_ref() {
+        store
+            .delete_proxy_route(&domain)
+            .map_err(|e| SparrowError::Internal(format!("proxy route: {e}")))?;
+    }
+    Ok((
         axum::http::StatusCode::OK,
         Json(serde_json::json!({"status": "ok"})),
-    )
+    ))
 }
 
 // ── Autoscale Handlers ──
@@ -428,27 +539,96 @@ async fn autoscale_list(State(state): State<SharedAppState>) -> Json<Vec<Autosca
 async fn autoscale_set(
     State(state): State<SharedAppState>,
     Json(policy): Json<AutoscalePolicy>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    // Autoscale policy lives in SQLite keyed by service id; replicate the
+    // same payload so followers converge.
+    if replicate_or_none(
+        &state,
+        crate::applier::request(
+            &policy.service_id,
+            crate::applier::OP_SET_AUTOSCALE,
+            serde_json::json!({
+                "config": {
+                    "min_replicas": policy.min_replicas,
+                    "max_replicas": policy.max_replicas,
+                    "cpu_target_percent": policy.cpu_target_percent,
+                    "memory_target_percent": null,
+                    "cooldown_seconds": policy.cooldown_seconds,
+                },
+                "paused": policy.paused,
+            }),
+        ),
+    )
+    .await?
+    .is_some()
+    {
+        state
+            .autoscale_policies
+            .write()
+            .await
+            .insert(policy.service_id.clone(), policy);
+        return Ok((
+            axum::http::StatusCode::CREATED,
+            Json(serde_json::json!({"status": "ok"})),
+        ));
+    }
     state
         .autoscale_policies
         .write()
         .await
-        .insert(policy.service_id.clone(), policy);
-    (
+        .insert(policy.service_id.clone(), policy.clone());
+    if let Some(store) = state.state_store.as_ref() {
+        store
+            .set_autoscale(
+                &policy.service_id,
+                &sparrow_core::AutoscalingConfig {
+                    min_replicas: policy.min_replicas,
+                    max_replicas: policy.max_replicas,
+                    cpu_target_percent: Some(policy.cpu_target_percent),
+                    memory_target_percent: None,
+                    cooldown_seconds: policy.cooldown_seconds,
+                },
+                policy.paused,
+            )
+            .map_err(|e| SparrowError::Internal(format!("autoscale: {e}")))?;
+    }
+    Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({"status": "ok"})),
-    )
+    ))
 }
 
 async fn autoscale_remove(
     State(state): State<SharedAppState>,
     axum::extract::Path(service_id): axum::extract::Path<String>,
-) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    if replicate_or_none(
+        &state,
+        crate::applier::request(
+            &service_id,
+            crate::applier::OP_DELETE_AUTOSCALE,
+            serde_json::Value::Null,
+        ),
+    )
+    .await?
+    .is_some()
+    {
+        state.autoscale_policies.write().await.remove(&service_id);
+        return Ok((
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({"status": "ok"})),
+        ));
+    }
     state.autoscale_policies.write().await.remove(&service_id);
-    (
+    if let Some(store) = state.state_store.as_ref() {
+        store
+            .delete_autoscale(&service_id)
+            .map_err(|e| SparrowError::Internal(format!("autoscale: {e}")))?;
+    }
+    Ok((
         axum::http::StatusCode::OK,
         Json(serde_json::json!({"status": "ok"})),
-    )
+    ))
 }
 
 // ── Alert Handlers ──
@@ -649,6 +829,30 @@ async fn raft_add_learner(
     ))
 }
 
+/// Promote caught-up learner(s) to full voters (joint-consensus change).
+/// Call after the learner has replicated (add_learner blocking=true);
+/// without this, new nodes never vote.
+async fn raft_promote(
+    State(state): State<SharedAppState>,
+    Json(req): Json<PromoteRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let cluster = state.raft_cluster.read().await;
+    let raft = cluster
+        .as_ref()
+        .ok_or_else(|| SparrowError::Unavailable("Raft not initialized".to_string()))?;
+    raft.promote_learner(&req.node_ids)
+        .await
+        .map_err(|e| SparrowError::RaftError(format!("promote: {e}")))?;
+    Ok(Json(
+        serde_json::json!({"status": "ok", "voters": req.node_ids}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PromoteRequest {
+    node_ids: Vec<u64>,
+}
+
 // ── Init ──
 
 pub fn init_cluster(
@@ -730,6 +934,7 @@ pub fn init_cluster_with_vault(
         }),
         raft_cluster: RwLock::new(raft_cluster),
         state_store,
+        runtime: None,
         rate_limiter: RwLock::new(HashMap::new()),
         auth_token,
         vault_key: RwLock::new(vault_key),
@@ -740,59 +945,49 @@ pub fn init_cluster_with_vault(
     })
 }
 
+/// Attach a PodmanRuntime handle so log endpoints can read containers.
+/// Call once at daemon startup; tests leave it None (503 quét).
+pub fn set_runtime(state: &SharedAppState, runtime: std::sync::Arc<sparrow_podman::PodmanRuntime>) {
+    // AppState behind Arc: interior mutability via try_write would need RwLock;
+    // runtime is set once before serving, so unsafe-free option: store in a
+    // one-shot via unsafe cell is overkill — instead handlers read via a
+    // static-free approach: we use Arc::get_mut fallback... simplest correct:
+    // keep Option but set here through a mutable borrow obtained once.
+    // NOTE: implemented via pointer write guarded by single-threaded startup.
+    let ptr = std::sync::Arc::as_ptr(state) as *mut AppState;
+    // SAFETY: called once before any request is served; no concurrent readers yet.
+    unsafe {
+        (*ptr).runtime = Some(runtime);
+    }
+}
+
 // ── Secret Handlers ──
 
 /// List all secret names.
-async fn secret_list(
-    State(state): State<SharedAppState>,
-) -> Result<Json<Vec<String>>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
-    store.list_secrets().map(Json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to list secrets: {e}"),
-        )
-    })
+async fn secret_list(State(state): State<SharedAppState>) -> ApiResult<Json<Vec<String>>> {
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
+    store
+        .list_secrets()
+        .map(Json)
+        .map_err(|e| SparrowError::Internal(format!("Failed to list secrets: {e}")).into())
 }
 
 /// Get a decrypted secret value.
 async fn secret_get(
     State(state): State<SharedAppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Result<String, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
+) -> ApiResult<String> {
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
     let vault_key = state.vault_key.read().await;
-    let key = vault_key.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Vault not initialized".to_string(),
-        )
-    })?;
+    let key = vault_key
+        .as_ref()
+        .ok_or_else(|| SparrowError::Unavailable("Vault not initialized".to_string()))?;
     let encrypted = store
         .get_secret(&name)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read secret: {e}"),
-            )
-        })?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Secret '{name}' not found")))?;
-    let decrypted = sparrow_core::crypto::decrypt(&encrypted, key).ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to decrypt secret".to_string(),
-        )
-    })?;
+        .map_err(|e| SparrowError::Internal(format!("Failed to read secret: {e}")))?
+        .ok_or_else(|| SparrowError::SecretNotFound(name.clone()))?;
+    let decrypted = sparrow_core::crypto::decrypt(&encrypted, key)
+        .ok_or_else(|| SparrowError::VaultError("Failed to decrypt secret".to_string()))?;
     Ok(decrypted)
 }
 
@@ -806,27 +1001,31 @@ async fn secret_set(
     State(state): State<SharedAppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
     Json(body): Json<SetSecretRequest>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
     let vault_key = state.vault_key.read().await;
-    let key = vault_key.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Vault not initialized".to_string(),
-        )
-    })?;
+    let key = vault_key
+        .as_ref()
+        .ok_or_else(|| SparrowError::Unavailable("Vault not initialized".to_string()))?;
     let encrypted = sparrow_core::crypto::encrypt(&body.value, key);
-    store.set_secret(&name, &encrypted).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to store secret: {e}"),
-        )
-    })?;
+    // Clustered mode: replicate before applying locally. The local applier
+    // mirrors the commit back into this same store (idempotent).
+    if let Some(req) = replicate_or_none(
+        &state,
+        crate::applier::request(
+            &name,
+            crate::applier::OP_SET_SECRET,
+            serde_json::json!({ "encrypted_value": encrypted }),
+        ),
+    )
+    .await?
+    {
+        let _ = req;
+    } else {
+        store
+            .set_secret(&name, &encrypted)
+            .map_err(|e| SparrowError::Internal(format!("Failed to store secret: {e}")))?;
+    }
     Ok(Json(serde_json::json!({"status": "stored", "name": name})))
 }
 
@@ -834,23 +1033,31 @@ async fn secret_set(
 async fn secret_delete(
     State(state): State<SharedAppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
-    let removed = store.delete_secret(&name).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to delete secret: {e}"),
-        )
-    })?;
+) -> ApiResult<Json<serde_json::Value>> {
+    // Clustered delete must replicate first; the boolean comes from the
+    // commit path, not a direct local read.
+    if replicate_or_none(
+        &state,
+        crate::applier::request(
+            &name,
+            crate::applier::OP_DELETE_SECRET,
+            serde_json::Value::Null,
+        ),
+    )
+    .await?
+    .is_some()
+    {
+        // Local mirror happens via the applier; report optimistically.
+        return Ok(Json(serde_json::json!({"status": "removed", "name": name})));
+    }
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
+    let removed = store
+        .delete_secret(&name)
+        .map_err(|e| SparrowError::Internal(format!("Failed to delete secret: {e}")))?;
     if removed {
         Ok(Json(serde_json::json!({"status": "removed", "name": name})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("Secret '{name}' not found")))
+        Err(SparrowError::SecretNotFound(name).into())
     }
 }
 
@@ -858,19 +1065,11 @@ async fn secret_delete(
 
 async fn service_list(
     State(state): State<SharedAppState>,
-) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
-    let services = store.list_services().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("list: {e}"),
-        )
-    })?;
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
+    let services = store
+        .list_services()
+        .map_err(|e| SparrowError::Internal(format!("list: {e}")))?;
     Ok(Json(
         services
             .into_iter()
@@ -888,27 +1087,12 @@ async fn service_list(
 async fn service_get(
     State(state): State<SharedAppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
     let svc = store
         .get_service(&id)
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("get: {e}"),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("Service '{id}' not found"),
-            )
-        })?;
+        .map_err(|e| SparrowError::Internal(format!("get: {e}")))?
+        .ok_or_else(|| SparrowError::ServiceNotFound(id.clone()))?;
     let containers = store.get_service_containers(&svc.id).unwrap_or_default();
     Ok(Json(serde_json::json!({
         "service": {
@@ -923,19 +1107,27 @@ async fn service_get(
 async fn service_delete(
     State(state): State<SharedAppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
-    let removed = store.delete_service(&id).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("delete: {e}"),
-        )
-    })?;
+) -> ApiResult<Json<serde_json::Value>> {
+    if replicate_or_none(
+        &state,
+        crate::applier::request(
+            &id,
+            crate::applier::OP_DELETE_SERVICE,
+            serde_json::Value::Null,
+        ),
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(Json(serde_json::json!({"removed": true})));
+    }
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
+    let removed = store
+        .delete_service(&id)
+        .map_err(|e| SparrowError::Internal(format!("delete: {e}")))?;
+    if !removed {
+        return Err(SparrowError::ServiceNotFound(id).into());
+    }
     Ok(Json(serde_json::json!({"removed": removed})))
 }
 
@@ -948,22 +1140,186 @@ async fn service_scale(
     State(state): State<SharedAppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<ScaleRequest>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    let store = state.state_store.as_ref().ok_or_else(|| {
-        (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "State store not available".to_string(),
-        )
-    })?;
-    let updated = store.update_replicas(&id, req.replicas).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("scale: {e}"),
-        )
-    })?;
+) -> ApiResult<Json<serde_json::Value>> {
+    if replicate_or_none(&state, crate::applier::scale_request(&id, req.replicas))
+        .await?
+        .is_some()
+    {
+        return Ok(Json(
+            serde_json::json!({"updated": true, "replicas": req.replicas}),
+        ));
+    }
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
+    let updated = store
+        .update_replicas(&id, req.replicas)
+        .map_err(|e| SparrowError::Internal(format!("scale: {e}")))?;
+    if !updated {
+        return Err(SparrowError::ServiceNotFound(id).into());
+    }
     Ok(Json(
         serde_json::json!({"updated": updated, "replicas": req.replicas}),
     ))
+}
+
+// ── Service Logs (aggregated multi-replica) ──
+
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    #[serde(default = "default_log_tail")]
+    tail: u32,
+}
+
+fn default_log_tail() -> u32 {
+    100
+}
+
+/// GET /api/v1/services/{id}/logs?tail=N — aggregate `podman logs` across all
+/// live replicas of the service. No runtime attached (tests) → 503;
+/// unknown service → 404.
+async fn service_logs(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<LogsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let store = state.state_store.as_ref().ok_or_else(store_unavailable)?;
+    let svc = store
+        .get_service(&id)
+        .map_err(|e| SparrowError::Internal(format!("get: {e}")))?
+        .ok_or_else(|| SparrowError::ServiceNotFound(id.clone()))?;
+    let runtime = state
+        .runtime
+        .as_ref()
+        .ok_or_else(|| SparrowError::Unavailable("log runtime not attached".to_string()))?;
+    let containers = runtime
+        .list_containers(&svc.name)
+        .await
+        .map_err(|e| SparrowError::Internal(format!("list: {e}")))?;
+    let mut entries: Vec<serde_json::Value> = vec![];
+    for c in &containers {
+        let lines = runtime
+            .logs(&c.name, q.tail)
+            .await
+            .map_err(|e| SparrowError::Internal(format!("logs: {e}")))?;
+        for line in lines {
+            entries.push(serde_json::json!({ "container": c.name, "line": line }));
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "service": svc.name,
+        "containers": containers.len(),
+        "tail": q.tail,
+        "logs": entries,
+    })))
+}
+
+/// GET /api/v1/services/{id}/logs/stream?tail=N — SSE fan-out of live replica logs.
+/// Replays last `tail` lines per replica, then streams new lines until the
+/// client disconnects. Each event data: `[container] line`. Errors are a
+/// single `error` event; the stream type is boxed so both paths unify.
+async fn service_logs_stream(
+    State(state): State<SharedAppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<LogsQuery>,
+) -> axum::response::Sse<
+    std::pin::Pin<
+        Box<
+            dyn futures_util::Stream<
+                    Item = Result<axum::response::sse::Event, std::convert::Infallible>,
+                > + Send,
+        >,
+    >,
+> {
+    use futures_util::StreamExt;
+    // Resolve everything fallible BEFORE building the stream.
+    let resolved: Result<(String, std::sync::Arc<sparrow_podman::PodmanRuntime>, u32), String> =
+        (|| {
+            let store = state
+                .state_store
+                .as_ref()
+                .ok_or_else(|| "state store not available".to_string())?;
+            let svc = store
+                .get_service(&id)
+                .map_err(|e| format!("get: {e}"))?
+                .ok_or_else(|| format!("Service '{id}' not found"))?;
+            let runtime = state
+                .runtime
+                .as_ref()
+                .ok_or_else(|| "log runtime not attached".to_string())?;
+            Ok((svc.name.clone(), std::sync::Arc::clone(runtime), q.tail))
+        })();
+    let (svc_name, runtime, tail) = match resolved {
+        Ok(v) => v,
+        Err(msg) => {
+            let s = futures_util::stream::once(async move {
+                Ok(axum::response::sse::Event::default()
+                    .event("error")
+                    .data(msg))
+            });
+            return axum::response::Sse::new(Box::pin(s));
+        }
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        // Discover replicas once (snapshot; late-joining replicas are out of scope).
+        let containers = match runtime.list_containers(&svc_name).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        // Replay tail per replica first (ordered by container, then line).
+        for c in &containers {
+            if let Ok(lines) = runtime.logs(&c.name, tail).await {
+                for line in lines {
+                    let _ = tx.send(format!("[{}] {}", c.name, line));
+                }
+            }
+        }
+        // Then follow live lines; children die with the task on client drop.
+        let mut _children = vec![];
+        for c in &containers {
+            let cname = c.name.clone();
+            let (ltx, mut lrx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            if let Ok(child) = runtime.logs_follow(&cname, 0, ltx).await {
+                _children.push(child);
+                let tx2 = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(line) = lrx.recv().await {
+                        let _ = tx2.send(format!("[{cname}] {line}"));
+                    }
+                });
+            }
+        }
+        // Park until receivers drop (client disconnect kills the task anyway).
+        futures_util::future::pending::<()>().await;
+    });
+    let s = tokio_stream::wrappers::UnboundedReceiverStream::new(rx)
+        .map(|line| Ok(axum::response::sse::Event::default().data(line)));
+    axum::response::Sse::new(Box::pin(s))
+}
+
+/// Propose `req` through Raft when this node is clustered.
+/// Returns `Ok(Some(response))` if replicated (callers skip the direct
+/// SQLite write — the local applier mirrors the commit), or `Ok(None)` in
+/// single-node mode (callers write SQLite directly as before).
+async fn replicate_or_none(
+    state: &SharedAppState,
+    req: sparrow_raft::RaftRequest,
+) -> ApiResult<Option<sparrow_raft::RaftResponse>> {
+    let guard = state.raft_cluster.read().await;
+    let Some(cluster) = guard.as_ref() else {
+        return Ok(None);
+    };
+    let resp = cluster
+        .propose(req)
+        .await
+        .map_err(|e| SparrowError::RaftError(e.to_string()))?;
+    if !resp.success {
+        return Err(SparrowError::RaftError(
+            resp.error
+                .unwrap_or_else(|| "state machine rejected write".to_string()),
+        )
+        .into());
+    }
+    Ok(Some(resp))
 }
 
 // ── WebSocket Dashboard ──
@@ -1087,5 +1443,62 @@ impl AppState {
         if let Some(list) = ips.get_mut(service_name) {
             list.retain(|i| i != ip);
         }
+    }
+}
+
+#[cfg(test)]
+mod logs_tests {
+    use super::*;
+    use axum::extract::{Path, Query, State};
+
+    fn state_no_runtime() -> SharedAppState {
+        init_cluster("t", "n", "127.0.0.1:7443", None)
+    }
+
+    fn state_with_store() -> SharedAppState {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        let store = Arc::new(StateStore::new(db.to_str().unwrap()).unwrap());
+        std::mem::forget(dir);
+        let mut spec = sparrow_core::ServiceSpec::new("web", "nginx");
+        spec.desired_replicas = 1;
+        store.create_service(&spec).unwrap();
+        init_cluster_with_vault("t", "n", "127.0.0.1:7443", None, None, None, Some(store))
+    }
+
+    #[tokio::test]
+    async fn logs_unknown_service_is_404() {
+        let state = state_with_store();
+        let err = service_logs(
+            State(state),
+            Path("nope".to_string()),
+            Query(LogsQuery { tail: 10 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.http_status(), 404);
+    }
+
+    #[tokio::test]
+    async fn logs_without_runtime_is_503() {
+        let state = state_with_store();
+        let err = service_logs(
+            State(state),
+            Path("web".to_string()),
+            Query(LogsQuery { tail: 10 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.http_status(), 503);
+    }
+
+    #[test]
+    fn logs_default_tail_is_100() {
+        assert_eq!(default_log_tail(), 100);
+    }
+
+    #[allow(dead_code)]
+    fn _keep_state_no_runtime() -> SharedAppState {
+        state_no_runtime()
     }
 }

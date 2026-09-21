@@ -1,8 +1,6 @@
 use sparrow_api::SharedAppState;
 use sparrow_podman::PodmanRuntime;
 
-const MCP_VERSION: &str = "0.1.0";
-
 #[derive(Debug)]
 pub struct ResourceContent {
     pub text: String,
@@ -32,7 +30,11 @@ pub async fn handle_resource_read(
                     return Err("Missing service name in URI".to_string());
                 }
                 let podman = podman.ok_or_else(|| "Podman runtime not available".to_string())?;
-                logs_resource(podman, service).await
+                let store = state
+                    .state_store
+                    .as_ref()
+                    .ok_or_else(|| "State store not available".to_string())?;
+                logs_resource(store, podman, service).await
             } else {
                 Err(format!("Unknown resource URI: {uri}"))
             }
@@ -81,7 +83,7 @@ async fn status_resource(state: &SharedAppState) -> Result<ResourceContent, Stri
         "nodes_ready": ready,
         "nodes_unreachable": unreachable,
         "nodes": nodes,
-        "version": MCP_VERSION,
+        "version": env!("CARGO_PKG_VERSION"),
     });
 
     Ok(ResourceContent {
@@ -90,14 +92,33 @@ async fn status_resource(state: &SharedAppState) -> Result<ResourceContent, Stri
     })
 }
 
-async fn logs_resource(podman: &PodmanRuntime, service: &str) -> Result<ResourceContent, String> {
-    let logs = podman
-        .logs(service, 100)
+async fn logs_resource(
+    store: &sparrow_core::state::StateStore,
+    podman: &PodmanRuntime,
+    service: &str,
+) -> Result<ResourceContent, String> {
+    // Same resolution as the `service_logs` tool: id-or-name -> service ->
+    // `{service}-{seq}` replicas, tagged per container.
+    let svc = store
+        .get_service(service)
+        .map_err(|e| format!("Failed to get service: {e}"))?
+        .ok_or_else(|| format!("Service '{service}' not found"))?;
+    let containers = podman
+        .list_containers(&svc.name)
         .await
-        .map_err(|e| format!("Failed to get logs: {e}"))?;
-
+        .map_err(|e| format!("Failed to list containers: {e}"))?;
+    let mut out: Vec<String> = vec![];
+    for c in containers.iter().take(16) {
+        let lines = podman
+            .logs(&c.name, 100)
+            .await
+            .map_err(|e| format!("Failed to get logs: {e}"))?;
+        for line in lines.iter().take(100) {
+            out.push(format!("[{}] {line}", c.name));
+        }
+    }
     Ok(ResourceContent {
-        text: logs.join("\n"),
+        text: out.join("\n"),
         mime_type: "text/plain".to_string(),
     })
 }
@@ -140,6 +161,37 @@ mod tests {
         let result = handle_resource_read("sparrow://logs/myapp", None, &app).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Podman runtime not available"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_resource_read_logs_unknown_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("res-test.db");
+        let store = std::sync::Arc::new(
+            sparrow_core::state::StateStore::new(db.to_str().unwrap()).unwrap(),
+        );
+        let app = sparrow_api::init_cluster_with_vault(
+            "test",
+            "localhost",
+            "127.0.0.1:7443",
+            None,
+            None,
+            None,
+            Some(store),
+        );
+        let podman = PodmanRuntime::new(true);
+        let result = handle_resource_read("sparrow://logs/nope", Some(&podman), &app).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_status_version_matches_package() {
+        let app = sparrow_api::init_cluster("test", "localhost", "127.0.0.1:7443", None);
+        let content = handle_resource_read("sparrow://status", None, &app)
+            .await
+            .unwrap();
+        assert!(content.text.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[tokio::test]

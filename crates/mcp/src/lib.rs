@@ -206,7 +206,7 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                     },
                     "serverInfo": {
                         "name": "sparrow",
-                        "version": "0.9.6"
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 }
             })
@@ -217,12 +217,12 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                 "tools": [
                     {
                         "name": "list_services",
-                        "description": "List all services",
+                        "description": "List all services (id, name, image, replicas, ports)",
                         "inputSchema": { "type": "object", "properties": {} }
                     },
                     {
                         "name": "get_service",
-                        "description": "Get a service by ID or name",
+                        "description": "Get a service by ID or name (ports, env keys, volumes, networks, autoscaling)",
                         "inputSchema": { "type": "object", "properties": { "id_or_name": {"type": "string"} }, "required": ["id_or_name"] }
                     },
                     {
@@ -232,12 +232,12 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                     },
                     {
                         "name": "scale_service",
-                        "description": "Scale a service to desired replicas",
-                        "inputSchema": { "type": "object", "properties": { "id_or_name": {"type": "string"}, "replicas": {"type": "integer"} }, "required": ["id_or_name", "replicas"] }
+                        "description": "Scale a service to desired replicas (replicated via Raft when clustered)",
+                        "inputSchema": { "type": "object", "properties": { "id_or_name": {"type": "string"}, "replicas": {"type": "integer", "minimum": 0} }, "required": ["id_or_name", "replicas"] }
                     },
                     {
                         "name": "cluster_status",
-                        "description": "Get overall cluster health",
+                        "description": "Overall cluster health (nodes, services, Raft leader, version)",
                         "inputSchema": { "type": "object", "properties": {} }
                     },
                     {
@@ -252,7 +252,7 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                     },
                     {
                         "name": "set_secret",
-                        "description": "Store an encrypted secret",
+                        "description": "Store an encrypted secret (same v2 envelope as CLI/API; replicated when clustered)",
                         "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "value": {"type": "string"} }, "required": ["name", "value"] }
                     },
                     {
@@ -262,8 +262,8 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                     },
                     {
                         "name": "service_logs",
-                        "description": "Get recent log lines from a service",
-                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "tail": {"type": "integer"} }, "required": ["name"] }
+                        "description": "Recent log lines aggregated across all live replicas, tagged by container",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "tail": {"type": "integer", "minimum": 1, "maximum": 200} }, "required": ["name"] }
                     },
                     {
                         "name": "service_ps",
@@ -272,13 +272,43 @@ fn handle_jsonrpc(body: &serde_json::Value, _state: &InternalState) -> serde_jso
                     },
                     {
                         "name": "deploy_service",
-                        "description": "Create and run a service",
-                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "image": {"type": "string"}, "replicas": {"type": "integer"} }, "required": ["name", "image"] }
+                        "description": "Create a service (image, replicas, ports, env, volumes, networks, restart, autoscale, domain). Rejects host ports with replicas > 1.",
+                        "inputSchema": { "type": "object", "properties": { "name": {"type": "string"}, "image": {"type": "string"}, "replicas": {"type": "integer", "minimum": 1}, "ports": {"type": "array", "items": {"type": "string"}}, "env": {"type": "object"}, "volumes": {"type": "array", "items": {"type": "string"}}, "networks": {"type": "array", "items": {"type": "string"}}, "restart": {"type": "string"}, "autoscale": {"type": "object"}, "domain": {"type": "string"} }, "required": ["name", "image"] }
+                    },
+                    {
+                        "name": "deploy_compose",
+                        "description": "Deploy every service in a docker-compose subset document (same loud subset as `sparrow deploy`: unsupported keys fail)",
+                        "inputSchema": { "type": "object", "properties": { "yaml": {"type": "string"} }, "required": ["yaml"] }
                     },
                     {
                         "name": "remove_service",
-                        "description": "Remove a service and its containers",
+                        "description": "Remove a service and its containers (replicated when clustered)",
                         "inputSchema": { "type": "object", "properties": { "name": {"type": "string"} }, "required": ["name"] }
+                    },
+                    {
+                        "name": "set_autoscale",
+                        "description": "Set an autoscale policy (min/max replicas, cpu/memory targets, cooldown, paused)",
+                        "inputSchema": { "type": "object", "properties": { "service_id": {"type": "string"}, "min_replicas": {"type": "integer"}, "max_replicas": {"type": "integer"}, "cpu_target_percent": {"type": "number"}, "memory_target_percent": {"type": "number"}, "cooldown_seconds": {"type": "integer"}, "paused": {"type": "boolean"} }, "required": ["service_id"] }
+                    },
+                    {
+                        "name": "remove_autoscale",
+                        "description": "Remove an autoscale policy",
+                        "inputSchema": { "type": "object", "properties": { "service_id": {"type": "string"} }, "required": ["service_id"] }
+                    },
+                    {
+                        "name": "proxy_add_route",
+                        "description": "Add a reverse-proxy route (domain -> service:target_port)",
+                        "inputSchema": { "type": "object", "properties": { "domain": {"type": "string"}, "service_name": {"type": "string"}, "target_port": {"type": "integer", "minimum": 1, "maximum": 65535}, "tls": {"type": "boolean"} }, "required": ["domain", "service_name", "target_port"] }
+                    },
+                    {
+                        "name": "proxy_remove_route",
+                        "description": "Remove a reverse-proxy route by domain",
+                        "inputSchema": { "type": "object", "properties": { "domain": {"type": "string"} }, "required": ["domain"] }
+                    },
+                    {
+                        "name": "proxy_list_routes",
+                        "description": "List all reverse-proxy routes",
+                        "inputSchema": { "type": "object", "properties": {} }
                     }
                 ]
             });

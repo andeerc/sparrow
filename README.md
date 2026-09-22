@@ -142,9 +142,11 @@ sparrow secret rm myapp/DB_PWD           # remover
 
 # Status
 sparrow status
+```
+
 ### API HTTP (porta 7443)
 
-```
+```text
 GET    /health | /api/v1/health
 GET    /api/v1/nodes
 POST   /api/v1/nodes/{id}/heartbeat

@@ -6,6 +6,13 @@ Wants=podman.socket
 
 [Service]
 Type=simple
+# RISK: `cluster init` recusa re-init quando os DBs Raft já existem
+# (refuse-to-avoid-split-brain, raft/cluster.rs:81-88) — reiniciar esta unit
+# após um init bem-sucedido falha em vez de reassumir; reset exige apagar
+# manualmente sparrow-<id>-raft-{log,sm}.db. Idempotência no restart NÃO verificada.
+# RISK: config padrão vive em $HOME/.config/sparrow/sparrow.yaml
+# (config.rs:225-236) e ProtectHome=true abaixo esconde o $HOME real —
+# rode com User=root ou ajuste ReadWritePaths se o daemon não achar config/vault.key.
 ExecStart=/usr/local/bin/sparrow cluster init --name prod --listen 0.0.0.0:7443
 Restart=on-failure
 RestartSec=5

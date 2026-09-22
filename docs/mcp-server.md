@@ -7,7 +7,7 @@ Sparrow expõe um **MCP Server** (Model Context Protocol) que permite qualquer a
 ```
 ┌──────────────────┐     MCP Protocol     ┌──────────────────┐
 │  OpenCode        │◄────────────────────►│  Sparrow MCP     │
-│  Cursor          │     stdio/HTTP       │  Server          │
+│  Cursor          │   stdio / SSE+POST   │  Server          │
 │  Copilot         │                      │                  │
 │  Qualquer MCP    │                      │  ┌────────────┐  │
 │  Client          │                      │  │ Sparrow    │  │
@@ -17,481 +17,102 @@ Sparrow expõe um **MCP Server** (Model Context Protocol) que permite qualquer a
                                           └──────────────────┘
 ```
 
+Implementado em v0.9.6 no crate `sparrow-mcp` (`crates/mcp/src/{lib.rs,tools.rs,resources.rs}`).
+
 ## Como Funciona
 
 Agente IA pode **criar, escalar, monitorar e gerenciar** serviços via ferramentas MCP:
 
 ```
-User: "sobe mais 3 réplicas do web-api no cluster de produção"
-IA:   ──► sparrow_mcp.scale_service("web-api", 8)
-      ◄── "web-api escalado de 5 para 8 réplicas. 3 novas em node-2 e node-3."
+User: "sobe o web-api para 8 réplicas"
+IA:   ──► tools/call { "name": "scale_service", "arguments": {"id_or_name": "web-api", "replicas": 8} }
+      ◄── réplicas desejadas atualizadas (via Raft quando em cluster, direto no SQLite em single-node)
 
 User: "o que tá rodando no cluster?"
-IA:   ──► sparrow_mcp.list_services()
-      ◄── "8 serviços rodando: web-api(5), worker(12), redis(1)..."
+IA:   ──► tools/call { "name": "list_services", "arguments": {} }
+      ◄── lista id, nome, imagem, réplicas, portas
 ```
+
+Escritas (`deploy_service`, `scale_service`, `set_secret`, `set_autoscale`, `proxy_add_route`, …)
+passam por `replicate()` (`crates/mcp/src/tools.rs:53-71`): em cluster propõem via Raft
+(`OP_UPSERT_SERVICE` e demais ops do `sparrow_api::applier`) e o applier local espelha o commit;
+em single-node escrevem direto no SQLite. O MCP **não** faz `POST /api/v1/services`
+— essa rota nem existe (a API só tem `GET /api/v1/services`, `GET /api/v1/services/{id}`,
+`DELETE /api/v1/services/{id}` e `POST /api/v1/services/{id}/scale`, `api/lib.rs:270-274`).
 
 ## Ferramentas MCP
 
-### Server Tools
+Lista exata retornada por `tools/list` (`crates/mcp/src/lib.rs:214-320`). São 19 ferramentas:
 
-```json
-{
-  "name": "sparrow_mcp",
-  "version": "1.0.0",
-  "description": "Control Sparrow container orchestrator from any MCP-compatible AI agent",
-  "tools": [
-    {
-      "name": "list_services",
-      "description": "List all services running in the cluster",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "cluster": {
-            "type": "string",
-            "description": "Cluster name (default: current context)",
-            "optional": true
-          },
-          "status": {
-            "type": "string",
-            "description": "Filter by status: running, stopped, all",
-            "enum": ["running", "stopped", "all"],
-            "default": "all"
-          }
-        }
-      }
-    },
-    {
-      "name": "create_service",
-      "description": "Create a new service (container deployment)",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Service name"
-          },
-          "image": {
-            "type": "string",
-            "description": "Container image (e.g., nginx:alpine, postgres:16)"
-          },
-          "replicas": {
-            "type": "integer",
-            "description": "Number of replicas",
-            "default": 1,
-            "minimum": 0,
-            "maximum": 100
-          },
-          "ports": {
-            "type": "array",
-            "description": "Port mappings (e.g., ['80:80', '443:443'])",
-            "items": {"type": "string"},
-            "optional": true
-          },
-          "env": {
-            "type": "object",
-            "description": "Environment variables (key-value)",
-            "additionalProperties": {"type": "string"},
-            "optional": true
-          },
-          "volumes": {
-            "type": "array",
-            "description": "Volume mounts (e.g., ['/data:/var/lib/data'])",
-            "items": {"type": "string"},
-            "optional": true
-          },
-          "network": {
-            "type": "string",
-            "description": "Network to attach the service to",
-            "optional": true
-          },
-          "restart": {
-            "type": "string",
-            "description": "Restart policy",
-            "enum": ["always", "on-failure", "no"],
-            "default": "always"
-          },
-          "command": {
-            "type": "string",
-            "description": "Command to run in the container",
-            "optional": true
-          },
-          "labels": {
-            "type": "object",
-            "description": "Labels for the service",
-            "additionalProperties": {"type": "string"},
-            "optional": true
-          }
-        },
-        "required": ["name", "image"]
-      }
-    },
-    {
-      "name": "scale_service",
-      "description": "Scale a service to the desired number of replicas",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          },
-          "replicas": {
-            "type": "integer",
-            "description": "Desired number of replicas",
-            "minimum": 0,
-            "maximum": 500
-          }
-        },
-        "required": ["service", "replicas"]
-      }
-    },
-    {
-      "name": "stop_service",
-      "description": "Stop a service (scale to 0) or remove it entirely",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          },
-          "remove": {
-            "type": "boolean",
-            "description": "Remove the service entirely (default: false, just stops)",
-            "default": false
-          }
-        },
-        "required": ["service"]
-      }
-    },
-    {
-      "name": "get_service_logs",
-      "description": "Get logs from a service's containers",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          },
-          "tail": {
-            "type": "integer",
-            "description": "Number of lines to tail (default: 100)",
-            "default": 100
-          },
-          "follow": {
-            "type": "boolean",
-            "description": "Stream logs continuously (default: false)",
-            "default": false
-          },
-          "since": {
-            "type": "string",
-            "description": "Show logs since timestamp (e.g., '5m', '1h', '2026-06-16T10:00:00Z')",
-            "optional": true
-          }
-        },
-        "required": ["service"]
-      }
-    },
-    {
-      "name": "update_service",
-      "description": "Rolling update of a service (change image, env, etc.)",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          },
-          "image": {
-            "type": "string",
-            "description": "New image tag (leave empty to keep current)",
-            "optional": true
-          },
-          "env": {
-            "type": "object",
-            "description": "Environment variables to update (key-value)",
-            "additionalProperties": {"type": "string"},
-            "optional": true
-          },
-          "parallelism": {
-            "type": "integer",
-            "description": "Number of containers to update at once (default: 1)",
-            "default": 1,
-            "optional": true
-          },
-          "delay": {
-            "type": "string",
-            "description": "Delay between updates (e.g., '10s', '30s')",
-            "default": "10s",
-            "optional": true
-          }
-        },
-        "required": ["service"]
-      }
-    },
-    {
-      "name": "list_nodes",
-      "description": "List all nodes in the cluster with status and resources",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "cluster": {
-            "type": "string",
-            "description": "Cluster name",
-            "optional": true
-          }
-        }
-      }
-    },
-    {
-      "name": "cluster_status",
-      "description": "Get overall cluster health, leader info, and resource usage",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "cluster": {
-            "type": "string",
-            "description": "Cluster name",
-            "optional": true
-          }
-        }
-      }
-    },
-    {
-      "name": "configure_autoscaling",
-      "description": "Enable, disable, or modify autoscaling policy for a service",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          },
-          "enabled": {
-            "type": "boolean",
-            "description": "Enable or disable autoscaling"
-          },
-          "min_replicas": {
-            "type": "integer",
-            "description": "Minimum number of replicas",
-            "optional": true
-          },
-          "max_replicas": {
-            "type": "integer",
-            "description": "Maximum number of replicas",
-            "optional": true
-          },
-          "cpu_target": {
-            "type": "integer",
-            "description": "Target CPU percentage (1-100)",
-            "optional": true
-          },
-          "memory_target": {
-            "type": "integer",
-            "description": "Target memory percentage (1-100)",
-            "optional": true
-          },
-          "request_target": {
-            "type": "integer",
-            "description": "Target requests per second per replica",
-            "optional": true
-          }
-        },
-        "required": ["service", "enabled"]
-      }
-    },
-    {
-      "name": "exec_in_container",
-      "description": "Execute a command in a running container (debugging)",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          },
-          "container": {
-            "type": "string",
-            "description": "Container index or name (default: first replica)",
-            "optional": true
-          },
-          "command": {
-            "type": "string",
-            "description": "Command to execute (e.g., 'ls -la', 'cat /etc/nginx/nginx.conf')"
-          },
-          "timeout": {
-            "type": "integer",
-            "description": "Command timeout in seconds (default: 30)",
-            "default": 30,
-            "optional": true
-          }
-        },
-        "required": ["service", "command"]
-      }
-    },
-    {
-      "name": "list_networks",
-      "description": "List all overlay networks in the cluster",
-      "inputSchema": {
-        "type": "object",
-        "properties": {}
-      }
-    },
-    {
-      "name": "create_network",
-      "description": "Create an overlay network for service communication",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "name": {"type": "string", "description": "Network name"},
-          "subnet": {
-            "type": "string",
-            "description": "CIDR subnet (e.g., '10.0.5.0/24')",
-            "optional": true
-          },
-          "driver": {
-            "type": "string",
-            "description": "Network driver: overlay, bridge",
-            "default": "overlay",
-            "optional": true
-          },
-          "internal": {
-            "type": "boolean",
-            "description": "Internal only (no external access)",
-            "default": false,
-            "optional": true
-          }
-        },
-        "required": ["name"]
-      }
-    },
-    {
-      "name": "get_service_info",
-      "description": "Get detailed information about a specific service",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          }
-        },
-        "required": ["service"]
-      }
-    },
-    {
-      "name": "rollback_service",
-      "description": "Rollback a service to the previous version",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "service": {
-            "type": "string",
-            "description": "Service name or ID"
-          }
-        },
-        "required": ["service"]
-      }
-    }
-  ]
-}
-```
+| Ferramenta | Descrição | Parâmetros |
+|---|---|---|
+| `list_services` | Lista todos os serviços (id, nome, imagem, réplicas, portas) | — |
+| `get_service` | Detalhe de um serviço (portas, chaves de env, volumes, networks, autoscaling) | `id_or_name` (obrigatório) |
+| `list_nodes` | Lista nós do cluster | — |
+| `scale_service` | Escala serviço para N réplicas (via Raft quando em cluster) | `id_or_name`, `replicas` (≥ 0, obrigatórios) |
+| `cluster_status` | Saúde geral (nós, serviços, líder Raft, versão) | — |
+| `get_secret` | Lê valor descriptografado de um secret | `name` (obrigatório) |
+| `list_secrets` | Lista nomes de secrets | — |
+| `set_secret` | Grava secret criptografado (mesmo envelope v2 do CLI/API; replicado em cluster) | `name`, `value` (obrigatórios) |
+| `delete_secret` | Remove secret por nome | `name` (obrigatório) |
+| `service_logs` | Últimas linhas agregadas de todas as réplicas vivas, marcadas por container (máx 200/requisição) | `name` (obrigatório), `tail` (1–200) |
+| `service_ps` | Lista containers de um serviço | `name` (obrigatório) |
+| `deploy_service` | Cria serviço (imagem, réplicas, portas, env, volumes, networks, restart, autoscale, domain). Rejeita host-port com réplicas > 1 | `name`, `image` (obrigatórios); `replicas`, `ports[]`, `env{}`, `volumes[]`, `networks[]`, `restart`, `autoscale{}`, `domain` |
+| `deploy_compose` | Faz deploy de todos os serviços de um documento docker-compose (mesmo subset barulhento do `sparrow deploy`: chaves não suportadas falham) | `yaml` (obrigatório) |
+| `remove_service` | Remove serviço e seus containers (replicado em cluster) | `name` (obrigatório) |
+| `set_autoscale` | Define política de autoscale (min/max, alvos cpu/mem, cooldown, paused) | `service_id` (obrigatório); `min_replicas`, `max_replicas`, `cpu_target_percent`, `memory_target_percent`, `cooldown_seconds`, `paused` |
+| `remove_autoscale` | Remove política de autoscale | `service_id` (obrigatório) |
+| `proxy_add_route` | Adiciona rota do reverse-proxy (domínio → serviço:porta) | `domain`, `service_name`, `target_port` (1–65535, obrigatórios); `tls` |
+| `proxy_remove_route` | Remove rota por domínio | `domain` (obrigatório) |
+| `proxy_list_routes` | Lista rotas do reverse-proxy | — |
 
-## Prompts (Recursos)
+Não existem em v0.9.6 (removidos deste doc por não terem handler em `tools.rs:24-45`):
+`create_service`, `stop_service`, `update_service`, `rollback_service`, `exec_in_container`,
+`get_service_info`, `create_network`, `list_networks`, `configure_autoscaling`.
+Use `deploy_service` / `remove_service` / `set_autoscale` no lugar.
 
-Além de ferramentas, o MCP server expõe **prompts** para guiar a IA:
+Regra de host-port (`tools.rs:140-153`, mesma do `boot_spec` em `src/main.rs`):
+host-ports com `replicas > 1` são rejeitadas com erro — use `replicas: 1` ou um `domain` de proxy.
 
-```json
-{
-  "prompts": [
-    {
-      "name": "analyze_cluster",
-      "description": "Analyze cluster health and suggest improvements",
-      "arguments": []
-    },
-    {
-      "name": "debug_service",
-      "description": "Debug a service that is not working as expected",
-      "arguments": [
-        {"name": "service", "description": "Service name", "required": true},
-        {"name": "issue", "description": "What's wrong", "required": true}
-      ]
-    },
-    {
-      "name": "optimize_deployment",
-      "description": "Suggest optimizations for a deployment configuration",
-      "arguments": [
-        {"name": "service", "description": "Service name", "required": true}
-      ]
-    },
-    {
-      "name": "scale_decision",
-      "description": "Explain why autoscaling made a particular decision",
-      "arguments": [
-        {"name": "service", "description": "Service name", "required": true},
-        {"name": "decision_time", "description": "Timestamp of the decision", "required": false}
-      ]
-    }
-  ]
-}
-```
+## Prompts
+
+O servidor v0.9.6 **não expõe prompts** (nenhum `prompts/list` em `crates/mcp/src/lib.rs`,
+nenhum `prompt` em `crates/mcp/src/`). Os prompts `analyze_cluster`, `debug_service`,
+`optimize_deployment` e `scale_decision` documentados anteriormente nunca foram implementados.
+[roadmap] Expor prompts de análise/debug/otimização.
 
 ## Recursos (Resources)
+
+`resources/list` (`crates/mcp/src/lib.rs:321-343`) expõe exatamente 2 recursos
+(handlers em `crates/mcp/src/resources.rs:20-43`):
 
 ```json
 {
   "resources": [
     {
-      "uri": "sparrow://cluster/status",
+      "uri": "sparrow://status",
       "name": "Cluster Status",
-      "description": "Overall cluster health and metrics",
+      "description": "Current cluster status and node health",
       "mimeType": "application/json"
     },
     {
-      "uri": "sparrow://services",
-      "name": "All Services",
-      "description": "List of all services with current state",
-      "mimeType": "application/json"
-    },
-    {
-      "uri": "sparrow://services/{id}/logs",
+      "uri": "sparrow://logs/{service}",
       "name": "Service Logs",
-      "description": "Recent logs for a specific service",
+      "description": "Recent log lines for a service",
       "mimeType": "text/plain"
-    },
-    {
-      "uri": "sparrow://services/{id}/spec",
-      "name": "Service Specification",
-      "description": "Full service configuration",
-      "mimeType": "application/json"
-    },
-    {
-      "uri": "sparrow://nodes",
-      "name": "All Nodes",
-      "description": "List of cluster nodes with status",
-      "mimeType": "application/json"
-    },
-    {
-      "uri": "sparrow://nodes/{id}/metrics",
-      "name": "Node Metrics",
-      "description": "CPU, memory, disk metrics for a node",
-      "mimeType": "application/json"
-    },
-    {
-      "uri": "sparrow://autoscale/history",
-      "name": "Autoscale Decision History",
-      "description": "Last 100 autoscaling decisions",
-      "mimeType": "application/json"
     }
   ]
 }
 ```
 
+URIs antigas (`sparrow://cluster/status`, `sparrow://services`, `sparrow://services/{id}/logs`,
+`sparrow://services/{id}/spec`, `sparrow://nodes`, `sparrow://nodes/{id}/metrics`,
+`sparrow://autoscale/history`) não existem — qualquer outro URI retorna
+`Unknown resource URI` (`resources.rs:39`).
+
 ## Integração com Clientes
 
-### OpenCode (Skill)
+### OpenCode (stdio — spawn como subprocesso)
 
 ```json
 // ~/.config/opencode/opencode.json
@@ -499,50 +120,52 @@ Além de ferramentas, o MCP server expõe **prompts** para guiar a IA:
   "mcpServers": {
     "sparrow": {
       "command": "sparrow",
-      "args": ["mcp"],
-      "env": {
-        "SPARROW_CLUSTER": "prod",
-        "SPARROW_ENDPOINT": "http://localhost:7443"
-      }
+      "args": ["mcp", "--stdio"]
     }
   }
 }
 ```
 
+Sem variáveis `SPARROW_CLUSTER` / `SPARROW_ENDPOINT` — o binário não lê nenhuma das duas
+(confirmado: nenhum `env::var` correspondente no crate MCP ou no dispatch `Command::Mcp`).
+O servidor MCP usa o `StateStore` e o `PodmanRuntime` locais do processo que o atende
+(`src/main.rs:194-227`).
+
 Depois no OpenCode:
 
 ```
-/oc-orquestrador (ou direto no prompt)
 "sobe 3 nginx com auto-scaling, expõe porta 80"
-
 IA:
-→ sparrow_mcp.create_network("frontend", "10.0.5.0/24")
-→ sparrow_mcp.create_service({name: "web", image: "nginx:alpine", replicas: 3, ports: ["80:80"], network: "frontend"})
-→ sparrow_mcp.configure_autoscaling({service: "web", enabled: true, min: 2, max: 20, cpu_target: 70})
-→ "Cluster pronto: 3 nginx rodando com auto-scaling CPU@70%, rede frontend criada."
+→ tools/call deploy_service {name: "web", image: "nginx:alpine", replicas: 1, domain: "web.local"}
+  (replicas 1 + domain: host-port com N réplicas é rejeitado — tools.rs:140-153)
+→ tools/call set_autoscale {service_id: "<id>", min_replicas: 2, max_replicas: 20, cpu_target_percent: 70}
+→ "Cluster pronto: web criado com auto-scaling CPU@70%, rota web.local configurada."
 ```
 
-### Cursor
+### Cursor (stdio)
 
 ```json
 {
   "mcpServers": {
     "sparrow": {
       "command": "sparrow",
-      "args": ["mcp", "--port", "3000"]
+      "args": ["mcp", "--stdio"]
     }
   }
 }
 ```
 
-### Claude Desktop (ou outro MCP client)
+Para modo remoto via SSE, rode `sparrow mcp --port 3000 --host 127.0.0.1` e aponte
+o cliente para `http://127.0.0.1:3000/sse` + `POST http://127.0.0.1:3000/messages`.
+
+### Claude Desktop (ou outro MCP client, stdio)
 
 ```json
 {
   "mcpServers": {
     "sparrow": {
       "command": "/usr/local/bin/sparrow",
-      "args": ["mcp", "--port", "3000"]
+      "args": ["mcp", "--stdio"]
     }
   }
 }
@@ -550,95 +173,102 @@ IA:
 
 ## Transporte
 
-Suporta dois transportes MCP:
+Dois transportes (`crates/mcp/src/lib.rs:83-97,362-453`; flags em `crates/core/src/cli.rs:53-66`):
 
-### 1. stdio (padrão — pra uso local)
+### 1. stdio (opt-in — pra uso local)
 
 ```bash
-sparrow mcp
+sparrow mcp --stdio
 # Lê JSON-RPC do stdin, escreve no stdout
-# Ideal: OpenCode, Cursor — spawn like a subprocess
+# Ideal: OpenCode, Cursor — spawn como subprocesso
 ```
 
-### 2. HTTP Streamable (pra remoto)
+### 2. SSE + POST (padrão — pra remoto)
 
 ```bash
-sparrow mcp --port 3000 --host 0.0.0.0
-# SSE endpoint: http://localhost:3000/sse
-# POST endpoint: http://localhost:3000/mcp
-# Ideal: Claude Desktop, servidor remoto
+sparrow mcp --port 3000 --host 127.0.0.1
+# SSE endpoint:  GET  http://127.0.0.1:3000/sse
+# POST endpoint: POST http://127.0.0.1:3000/messages
+# Ideal: servidor remoto
 ```
+
+O endpoint POST é `/messages` — `/mcp` nunca existiu no `router()` (`lib.rs:92-97`).
+Flags reais: `--port` (default `3000`), `--host` (default `127.0.0.1`), `--stdio`.
+Não há flag `--token`.
 
 ## Autenticação
 
-Quando MCP server está em modo HTTP, requer autenticação:
-
-```bash
-sparrow mcp --port 3000 --token <sparrow-token>
-# Client precisa passar: Authorization: Bearer <token>
-```
-
-O token é o mesmo do cluster Sparrow (gerado no `sparrow cluster init`).
+Sem autenticação em v0.9.6: `Command::Mcp` (`cli.rs:53-66`) tem só `port`/`host`/`stdio`,
+e nem o `router()` MCP nem `start_mcp_stdio` checam `Authorization`.
+O Bearer token + rate-limit 100/min existem só na API HTTP (`api/lib.rs:178-221),
+não no MCP. [roadmap] Exigir Bearer no modo SSE/HTTP.
 
 ## Casos de Uso pra IA
 
 ### Deploy Automático
 
 ```
-"Faz deploy da minha aplicação: frontend React, backend Node, PostgreSQL.
- 3 réplicas cada, auto-scaling por CPU, rede isolada pros serviços se comunicarem."
+"Faz deploy da minha aplicação: frontend React, backend Node, PostgreSQL."
+→ deploy_service uma vez por serviço (ports como ["8080:80"], env como {"KEY": "val"} ou {"KEY": "secret:nome"})
+→ deploy_compose com o YAML inteiro (subset barulhento: chave não suportada falha a chamada)
+→ proxy_add_route por domínio público
 ```
 
 ### Diagnóstico
 
 ```
-"O web-api está lento. Investiga: logs, CPU/memória, tráfego, erros recentes."
+"O web-api está lento. Investiga: logs, containers, status."
+→ service_logs {name: "web-api", tail: 100}
+→ service_ps {name: "web-api"}
+→ get_service {id_or_name: "web-api"} + cluster_status
 ```
 
 ### Manutenção
 
 ```
-"Faz rolling update do web-api pra imagem v2.3 com paralelismo 2."
+"Escala o web-api para 5 réplicas e depois remove o worker antigo."
+→ scale_service {id_or_name: "web-api", replicas: 5}
+→ remove_service {name: "worker-old"}
 ```
+
+Rolling update com paralelismo/delay, `exec` em container e rollback não existem como
+ferramentas em v0.9.6 ([roadmap]).
 
 ### Otimização
 
 ```
 "Analisa o cluster e sugere ajustes nos recursos e políticas de autoscaling."
+→ cluster_status + list_services + get_service por serviço
+→ set_autoscale / remove_autoscale para aplicar
 ```
 
 ### Segurança
 
 ```
-"Lista todos os serviços expostos na porta 80/443 e verifica se têm health check."
+"Lista os secrets e as rotas expostas."
+→ list_secrets + proxy_list_routes
+→ get_service por serviço para conferir portas/env (só chaves, nunca valores)
 ```
 
 ## Implementação
 
-Planejada pra Fase 2 do roadmap. O MCP server será um módulo separado dentro do Sparrow:
+Implementado na Fase 4 do roadmap. O MCP server é o crate `sparrow-mcp`:
 
 ```
-src/
-└── mcp/
-    ├── mod.rs              # MCP server init
-    ├── tools.rs            # Tool definitions + handlers
-    ├── prompts.rs          # Prompt templates
-    ├── resources.rs        # Resource endpoints
-    └── transport.rs        # stdio + HTTP transport
+crates/mcp/
+├── Cargo.toml        # sparrow-mcp 0.9.6 (axum SSE, sem SDK MCP externo)
+├── src/
+│   ├── lib.rs        # McpServer::router (/sse + /messages), tools/list, resources/list, stdio
+│   ├── tools.rs      # handle_tool_call + 19 handlers (deploy/scale/secrets/autoscale/proxy)
+│   └── resources.rs  # sparrow://status + sparrow://logs/{service}
 ```
 
-**Dependências Rust::**
-```toml
-[dependencies]
-# MCP protocol implementation (no existing Rust SDK complete enough yet)
-# Opções: implementar o protocolo manualmente (simples, ~500 linhas)
-#         ou usar rmcp (Rust MCP - comunidade)
-```
+Sem `prompts.rs` / `transport.rs` separados — transporte vive em `lib.rs`
+(`sse_handler`, `messages_handler`, `start_mcp_stdio`, `start_mcp`).
 
-O protocolo MCP é simples o bastante pra implementar na mão:
+O protocolo é JSON-RPC 2.0 direto:
 
 ```rust
-// JSON-RPC 2.0 + MCP spec
 // Request: {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"scale_service","arguments":{...}}}
 // Response: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}
 ```
@@ -650,24 +280,20 @@ sequenceDiagram
     participant User
     participant OC as OpenCode
     participant SparrowMCP as Sparrow MCP Server
-    participant SparrowAPI as Sparrow Core API
+    participant Store as StateStore / Raft
     participant Podman as Podman Runtime
-    
-    User->>OC: deploy 3 nginx com auto-scaling cpu 70%
-    
-    OC->>SparrowMCP: tools/call {name: "create_service", args: {name: "web", image: "nginx:alpine", replicas: 3, ports: ["80:80"]}}
-    SparrowMCP->>SparrowAPI: POST /v1/services {name: "web", image: "nginx:alpine", replicas: 3, ports: [{published: 80, target: 80}]}
-    SparrowAPI->>SparrowAPI: Raft log append
-    SparrowAPI->>Podman: podman run -d --name web-1 nginx
-    SparrowAPI->>Podman: podman run -d --name web-2 nginx
-    SparrowAPI->>Podman: podman run -d --name web-3 nginx
-    SparrowAPI-->>SparrowMCP: {id: "svc_abc", status: "running", replicas: 3}
+
+    User->>OC: deploy nginx com auto-scaling cpu 70%
+
+    OC->>SparrowMCP: tools/call {name: "deploy_service", args: {name: "web", image: "nginx:alpine", replicas: 1, domain: "web.local"}}
+    SparrowMCP->>Store: replicate() → Raft propose (cluster) ou upsert_service (single-node)
+    Store-->>SparrowMCP: {message: "Service 'web' created", id, replicas}
     SparrowMCP-->>OC: Tool result: JSON
-    
-    OC->>SparrowMCP: tools/call {name: "configure_autoscaling", args: {service: "web", enabled: true, min: 2, max: 20, cpu_target: 70}}
-    SparrowMCP->>SparrowAPI: POST /v1/services/svc_abc/autoscale {cpu_target: 70, min: 2, max: 20}
-    SparrowAPI-->>SparrowMCP: {autoscaling: "configured"}
+
+    OC->>SparrowMCP: tools/call {name: "set_autoscale", args: {service_id: "<id>", cpu_target_percent: 70, min_replicas: 2, max_replicas: 20}}
+    SparrowMCP->>Store: replicate() → autoscale write (+ applier espelha em cluster)
+    Store-->>SparrowMCP: {autoscaling: "configured"}
     SparrowMCP-->>OC: Tool result
-    
-    OC-->>User: ✅ 3 nginx rodando com auto-scaling ativo (cpu@70%, min=2, max=20)
+
+    OC-->>User: ✅ web rodando com auto-scaling ativo (cpu@70%, min=2, max=20)
 ```

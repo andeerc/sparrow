@@ -1,3 +1,10 @@
+> **HISTÓRICO — não executar.** Documento de planejamento pré-projeto (fases 0–4,
+> `cargo init` → single-node → multi-node → produção → maturidade). Superseded pela
+> implementação v0.9.6 real: workspace, CLI, SQLite, Podman runtime, Raft (OpenRaft
+> 0.10-alpha.22), API axum, proxy, autoscale CPU/mem, secrets AES-256-GCM+Argon2id,
+> MCP `sparrow-mcp`. Mantido como registro histórico; o estado atual está nos docs
+> de arquitetura/CLI/segurança, não neste plano.
+
 # Plano de Implementação — Sparrow
 
 **Status atual:** Fase 0 (Foundation) ✅ Completa
@@ -516,4 +523,4 @@ Fase 4 ────────────────────────�
 
 ## Próximo Passo
 
-**Começar Fase 0 — Tarefa 0.1**: `cargo init` com workspace structure.
+**[HISTÓRICO — já executado, não rodar]** ~~Começar Fase 0 — Tarefa 0.1: `cargo init` com workspace structure.~~ O workspace v0.9.6 já existe (`Cargo.toml` na raiz, crates `core/podman/proto/raft/api/mcp`); rodar `cargo init` agora destruiria o projeto.

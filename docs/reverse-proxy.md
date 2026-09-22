@@ -2,7 +2,7 @@
 
 ## Visão
 
-Sparrow pode atuar como **reverse proxy HTTP/HTTPS** embutido, eliminando a necessidade de Nginx, Traefik, Caddy ou Envoy separados. Um binário faz orquestração + proxy.
+Sparrow embute um proxy HTTP puro que roteia por `Host` para containers Running. Um binário faz orquestração mais proxy, sem Nginx ou Traefik separado. Em v0.9.6 o proxy faz só HTTP sem TLS, sem roteamento por path, sem sticky sessions e sem dreno por health check.
 
 ```
 Internet
@@ -11,15 +11,12 @@ Internet
 ┌──────────────────────────────────────┐
 │         Sparrow Proxy (built-in)     │
 │                                      │
-│  api.meudominio.com ──► web-api:3000 │
+│  api.meudominio.com ──► api:3000     │
 │  app.meudominio.com ──► frontend:80  │
-│  admin.meudominio.com ─► admin:8080  │
-│  *.meudominio.com   ──► default:80   │
 │                                      │
-│  TLS termination (rustls)            │
-│  Rate limiting                       │
-│  Request logging                     │
-│  Health-based routing                │
+│  Host-based routing (find_route)     │
+│  Round-robin (resolve_target)        │
+│  Rate limiting (100/min, 429)        │
 └──────────┬───────────────────────────┘
            │
            ▼
@@ -29,55 +26,29 @@ Internet
     └──────────────┘
 ```
 
-## Arquitetura
+## Como Funciona
 
-### Como Funciona
+Sequência real por request (`crates/api/src/proxy.rs:26-183`):
 
-O Sparrow **embute** um proxy HTTP (baseado em `hyper` + `rustls`) que:
+1. Lê o header `Host`, remove a porta e busca rota por igualdade exata (`find_route`). Primeiro no SQLite (`list_proxy_routes`), depois no cache em memória (`proxy_routes`). Sem `Host`, responde 400. Sem rota, responde 404.
+2. Resolve o alvo (`resolve_target`): IPs ativos do serviço no SQLite (`get_active_container_ips`), com fallback para o cache em memória (`container_ips`). Escolhe um IP por round-robin (`round_robin` map). Sem IP, usa `127.0.0.1`.
+3. Encaminha (`forward`) como `http://<ip>:<target_port><uri>` com cliente `hyper` HTTP puro. Ajusta `Host` para o alvo e adiciona `x-forwarded-for` (IP do peer TCP), `x-forwarded-proto: http` e `x-forwarded-host` original.
+4. Se o request tem `Upgrade: websocket`, encaminha via `forward_ws`.
+5. O middleware da API (`crates/api/src/lib.rs:178-224`) aplica Bearer opcional e rate-limit global de 100 req/min por IP de peer TCP, com 429 acima do limite.
 
-1. Escuta nas portas configuradas (80, 443, etc.)
-2. Roteia requests baseado em domínio/path para serviços
-3. Faz TLS termination com certificados gerenciados pelo Sparrow
-4. Distribui tráfego entre réplicas do serviço
-5. Remove réplicas unhealthy automaticamente
-6. Health check contínuo (a cada 5s)
-7. Sticky sessions opcionais (cookie ou IP hash)
+Não há terminação TLS no proxy, nem ACME, nem roteamento por path ou wildcard, nem sticky, nem remoção de réplica unhealthy do pool, nem log de acesso estruturado. A tabela Funcionalidades abaixo marca cada item.
 
-```
-┌────────────────────────────────────────────────────┐
-│              Sparrow Proxy Engine                  │
-│                                                    │
-│  ┌──────────┐   ┌──────────┐   ┌────────────────┐ │
-│  │ TLS      │──▶│ Router   │──▶│ Load Balancer  │ │
-│  │ (rustls) │   │ (host +  │   │ (round-robin,  │ │
-│  │          │   │  path)   │   │  least-conn,   │ │
-│  │          │   │          │   │  IP hash)      │ │
-│  └──────────┘   └──────────┘   └───────┬────────┘ │
-│                                        │          │
-│  ┌─────────────────────────────────────┴──────┐   │
-│  │         Health Checker (5s interval)       │   │
-│  │  mark unhealthy → remove from pool         │   │
-│  └────────────────────────────────────────────┘   │
-│                                                    │
-│  ┌────────────────┐  ┌────────────────┐           │
-│  │ Rate Limiter   │  │ Access Log     │           │
-│  │ (token bucket) │  │ (structured)   │           │
-│  └────────────────┘  └────────────────┘           │
-└────────────────────────────────────────────────────┘
-```
+## Onde Roda
 
-### Onde Roda
-
-O proxy roda como **parte do Sparrow** no plano de controle, não em container separado:
+O proxy roda no mesmo processo do plano de controle:
 
 ```
 ┌─────────────────┐
-│  Node A (leader)│
+│  Node (cluster) │
 │                 │
 │  sparrow        │
-│  ├── orchestrator│
-│  ├── proxy      │  ←─ escuta :80, :443, :8080...
-│  ├── api server │  ←─ escuta :7443 (admin)
+│  ├── api server │  ←─ :7443 por padrão (dashboard + /api/v1/*)
+│  ├── proxy      │  ←─ :7444 fixo (start_proxy)
 │  └── raft       │
 │                 │
 │  ┌─────────────┐│
@@ -87,177 +58,84 @@ O proxy roda como **parte do Sparrow** no plano de controle, não em container s
 └─────────────────┘
 ```
 
-Em modo multi-node, cada nó pode rodar o proxy, ou só nós designados como "ingress":
-
-```bash
-# Todos os nós viram proxy (ingress mesh, estilo Swarm)
-sparrow cluster init --proxy-mode ingress
-
-# Só nós com label viram proxy
-sparrow node label node-1 sparrow.proxy=true
-```
-
-### TLS
-
-Gerenciamento de certificados **embutido** (sem depender de cert-manager ou manual):
-
-```bash
-# Auto (Let's Encrypt)
-sparrow service create \
-    --name web \
-    --image nginx \
-    --domain app.meudominio.com \
-    --tls auto               # Let's Encrypt automático
-
-# Custom
-sparrow service create \
-    --name web \
-    --image nginx \
-    --domain app.meudominio.com \
-    --tls cert=/etc/certs/cert.pem,key=/etc/certs/key.pem
-
-# Self-signed (dev)
-sparrow service create \
-    --name web \
-    --image nginx \
-    --domain app.local \
-    --tls self-signed
-```
-
-**Implementação:**
-- `rustls` (TLS 1.3, sem OpenSSL)
-- Let's Encrypt via `acme-client` crate
-- Renovação automática (30 dias antes de expirar)
-- HTTP-01 challenge (porta 80) ou DNS-01 challenge
-
-### Funcionamento do ACME HTTP-01 Challenge
-
-O Sparrow possui um interceptador embutido no reverse proxy para responder aos desafios de validação do Let's Encrypt de forma automática.
-
-1. **Interceptação na porta 80/HTTP:**
-   Quando a CA do Let's Encrypt acessar `http://<seu-dominio>/.well-known/acme-challenge/<token>`, o proxy integrado intercepta a chamada.
-
-2. **Resolução via Secrets Vault:**
-   O proxy interceptador carrega o valor do token a partir do segredo armazenado no banco SQLite seguro sob a chave `acme/<token>` (descriptografando na hora com a chave mestra do cluster).
-
-3. **Aprovisionamento do Desafio:**
-   Para habilitar ou renovar um certificado via ACME, basta salvar o desafio correspondente na tabela de secrets do cluster usando a CLI do Sparrow:
-   ```bash
-   sparrow secret set "acme/<token>" "<valor-da-resposta>"
-   ```
+Referências: `src/main.rs:702-727` (sobe API no `listen` e proxy na porta 7444), `crates/core/src/cli.rs:148-156` (padrão `0.0.0.0:7443` em `cluster init`), `crates/api/src/lib.rs:158-177` (`start_proxy`), `:252-299` (rotas da API mais fallback para o proxy).
 
 ## Configuração
 
-### Via CLI
+### Via CLI (flags reais)
+
+`service create` aceita só `--domain` para o proxy (`crates/core/src/cli.rs:189-231`). Não existem `--tls`, `--health-path`, `--sticky-sessions`, `--path` ou `--proxy-*` em v0.9.6.
 
 ```bash
-# Serviço web com proxy
+# Serviço web com proxy pelo domínio
 sparrow service create \
     --name api \
     --image myapp/api \
     --replicas 3 \
-    --port 3000 \
-    --domain api.meudominio.com \
-    --tls auto \
-    --health-path /health \
-    --sticky-sessions
+    --port 3000:3000 \
+    --domain api.meudominio.com
 
-# Múltiplos domínios pro mesmo serviço
+# Múltiplos serviços, um domínio cada
 sparrow service create \
     --name web \
     --image nginx \
-    --port 80 \
-    --domain app.meudominio.com \
-    --domain app2.meudominio.com
-
-# Path-based routing
-sparrow service create \
-    --name api-v1 \
-    --image myapp/v1 \
-    --port 3000 \
-    --domain api.meudominio.com \
-    --path /v1/*
-
-sparrow service create \
-    --name api-v2 \
-    --image myapp/v2 \
-    --port 3000 \
-    --domain api.meudominio.com \
-    --path /v2/*
-
-# Proxy config custom
-sparrow service update api \
-    --proxy-rate-limit 1000/s \
-    --proxy-timeout 60s \
-    --proxy-body-limit 10MB \
-    --proxy-websocket true
+    --port 80:80 \
+    --domain app.meudominio.com
 ```
 
-### Via YAML (app.yaml)
+Regra de portas (`src/main.rs:971-985`): réplicas maiores que 1 com host ports são recusadas com erro literal. O caminho suportado para escalar com porta publicada é `--replicas 1` para acesso direto, ou `--domain` para rotear pelo proxy (porta 7444) para IPs internos dos containers.
+
+Não há subcomando `sparrow proxy` em v0.9.6 (`crates/core/src/cli.rs:16-108`). Não existem `proxy routes`, `proxy stats`, `proxy health` ou `proxy set-weight`.
+
+### Via YAML (campos reais)
+
+`DeploySpec` aceita só `domain` como campo de proxy (`crates/core/src/deploy.rs:99-125`).
 
 ```yaml
-services:
-  api:
-    image: myapp/api:latest
-    replicas: 3
-    port: 3000
-    proxy:
-      domain: api.meudominio.com
-      tls: auto
-      health:
-        path: /health
-        interval: 10s
-        timeout: 5s
-        unhealthy_threshold: 3
-      rate_limit: 1000/s
-      sticky_sessions: true
-      websocket: true
-      timeout: 60s
-      body_limit: 10MB
-      cors:
-        origins:
-          - https://app.meudominio.com
-        methods: [GET, POST, PUT, DELETE]
-        headers: [Authorization, Content-Type]
-
-  frontend:
-    image: myapp/web:latest
-    replicas: 2
-    port: 80
-    proxy:
-      domain: app.meudominio.com
-      tls: auto
-      paths:
-        - /assets/*   # cache 1 ano
-        - /api/*      # proxy pra api service
-        - /*          # SPA fallback
-
-  admin:
-    image: myapp/admin:latest
-    replicas: 1
-    port: 8080
-    proxy:
-      domain: admin.meudominio.com
-      tls: auto
-      whitelist:  # só IPs internos
-        - 10.0.0.0/8
-        - 192.168.0.0/16
-      basic_auth:
-        user: admin
-        password_file: /run/secrets/admin_pass
+apiVersion: sparrow/v1
+kind: Service
+metadata:
+  name: api
+spec:
+  image: myapp/api:latest
+  replicas: 3
+  ports:
+    - published: 3000
+      target: 3000
+  domain: api.meudominio.com
 ```
+
+Sem bloco `proxy:` com `tls`, `health`, `rate_limit`, `sticky_sessions`, `websocket`, `timeout`, `body_limit`, `cors`, `whitelist` ou `basic_auth`. Esses campos não existem no manifest e são ignorados se adicionados.
+
+### Via API
+
+Rotas reais (`crates/api/src/lib.rs:264-266,442-525`):
+
+- `GET /api/v1/proxy/routes` lista rotas em memória.
+- `POST /api/v1/proxy/routes` adiciona rota com JSON `{"domain","target_port","service_name","tls"}` e persiste no SQLite.
+- `DELETE /api/v1/proxy/routes/{domain}` remove do cache e do SQLite.
+
+```bash
+curl -s http://127.0.0.1:7443/api/v1/proxy/routes
+
+curl -s -X POST http://127.0.0.1:7443/api/v1/proxy/routes \
+  -H 'Content-Type: application/json' \
+  -d '{"domain":"api.meudominio.com","target_port":3000,"service_name":"api","tls":false}'
+
+curl -s -X DELETE http://127.0.0.1:7443/api/v1/proxy/routes/api.meudominio.com
+```
+
+O campo `tls` é persistido mas o proxy só fala HTTP em v0.9.6. Envie `false`.
 
 ### Auto-descoberta
 
-Quando um serviço tem `proxy.domain` configurado, o Sparrow **automaticamente**:
+Quando um serviço é criado com `--domain`, o Sparrow registra a rota (`register_route`) e o IP dos containers (`add_container_ip`) sem restartar nada (`src/main.rs:1103-1115`, `crates/api/src/lib.rs:1401-1438`):
 
-1. Adiciona a rota no proxy
-2. Configura health check
-3. Sobe certificado TLS (se for auto)
-4. Começa a rotear tráfego
-5. Remove a rota quando o serviço é removido
+1. Adiciona a rota domínio para serviço e porta alvo.
+2. Guarda os IPs dos containers criados.
+3. Começa a rotear tráfego na porta 7444.
 
-Sem precisar restartar o proxy. Sem editar config. Zero downtime.
+Sem certificado, sem health check de rota e sem remoção por unhealthy. Remoção de rota acontece por `DELETE` na API ou `remove_route`.
 
 ## Funcionalidades
 
@@ -302,174 +180,69 @@ Sem precisar restartar o proxy. Sem editar config. Zero downtime.
 | WAF (Web App Firewall) | ❌ (futuro) |
 | OAuth2 proxy | ❌ (futuro) |
 
-## Performance
-
-Como é Rust puro com `hyper`, performance comparável a Nginx e Caddy:
-
-```
-Benchmark (1 réplica, 1KB response, 100 conexões concorrentes):
-
-Proxy              RPS          Latência p99   Memory
-─────────────────────────────────────────────────────
-Nginx              182,000      2.1ms          18MB
-Caddy              156,000      2.8ms          22MB
-Sparrow (built-in) 168,000      2.4ms          8MB     ← sem dependências
-Envoy              145,000      3.1ms          35MB
-Traefik            98,000       4.2ms          40MB
-```
-
-> Sparrow é mais leve porque é o **mesmo processo** — sem overhead de comunicação entre proxy e orquestrador.
-
 ## Comparativo
 
-| Feature | Sparrow embutido | Nginx + Swarm | Traefik + K8s | Caddy |
+Só o que o proxy faz hoje conta como ✅ na coluna Sparrow.
+
+| Feature | Sparrow embutido v0.9.6 | Nginx + Swarm | Traefik + K8s | Caddy |
 |---|---|---|---|---|
-| TLS automático | ✅ Let's Encrypt | ❌ manual | ✅ cert-manager | ✅ |
-| Service discovery | ✅ nativo | ❌ manual | ✅ via K8s API | ❌ file watcher |
-| Health-based routing | ✅ nativo | ❌ | ✅ | ❌ |
-| Rate limiting | ✅ | ✅ (njs/lua) | ✅ | ❌ |
-| Auto-scaling integrado | ✅ | ❌ | ✅ (HPA) | ❌ |
-| Binário único | ✅ (com orquestrador) | ❌ | ❌ | ✅ (só proxy) |
-| Config dinâmica | ✅ via API | ❌ reload | ✅ via K8s | ❌ reload |
-| Sticky sessions | ✅ | ✅ ip_hash | ✅ | ❌ |
-| WebSocket | ✅ | ✅ | ✅ | ✅ |
-| gRPC | ✅ | ✅ (http2) | ✅ | ✅ |
-| Zero-downtime config | ✅ | ❌ | ✅ | ❌ |
-
-## CLI - Comandos de Proxy
-
-```bash
-# Listar rotas do proxy
-sparrow proxy routes
-DOMAIN                 SERVICE   TARGETS              TLS       HEALTH
-api.meudominio.com      api       10.0.1.2:3000       ✅ (LE)   ✅ 3/3
-                               └  10.0.1.3:3000
-app.meudominio.com      frontend  10.0.1.5:80         ✅ (LE)   ✅ 2/2
-admin.meudominio.com    admin     10.0.2.2:8080       ✅ (self) ⚠️ 1/2
-
-# Ver estatísticas
-sparrow proxy stats
-REQUESTS/S  LATENCY P50  LATENCY P99  ERROR%  ACTIVE CONNS
-1,234       4ms          42ms          0.12%   47
-
-# Ver health checks
-sparrow proxy health
-SERVICE   ENDPOINT        STATUS   LAST CHECK   REASON
-api       10.0.1.2:3000   ✅ Up    2s ago       200 OK (3ms)
-api       10.0.1.3:3000   ✅ Up    2s ago       200 OK (4ms)
-api       10.0.1.4:3000   ❌ Down  2s ago       connection refused
-```
+| TLS automático | ❌ (futuro) | ❌ manual | ✅ cert-manager | ✅ |
+| Service discovery | ✅ nativo (`register_route` + `find_route`) | ❌ manual | ✅ via K8s API | ❌ file watcher |
+| Health-based routing | ❌ (futuro) | ❌ | ✅ | ❌ |
+| Rate limiting | ✅ (100/min global, 429) | ✅ (njs/lua) | ✅ | ❌ |
+| Auto-scaling integrado | ✅ (CPU/memória, ver `auto-scaling.md`) | ❌ | ✅ (HPA) | ❌ |
+| Binário único | ✅ (orquestrador mais proxy) | ❌ | ❌ | ✅ (só proxy) |
+| Config dinâmica | ✅ via API sem restart | ❌ reload | ✅ via K8s | ❌ reload |
+| Sticky sessions | ❌ (futuro) | ✅ ip_hash | ✅ | ❌ |
+| WebSocket | ✅ (forward) | ✅ | ✅ | ✅ |
+| gRPC | ❌ (futuro) | ✅ (http2) | ✅ | ✅ |
+| Zero-downtime config | ✅ (rota entra sem restart) | ❌ | ✅ | ❌ |
 
 ## Casos de Uso
 
-### 1. Substituir Nginx + Swarm
+### 1. Um domínio por serviço com réplicas
 
 ```
-Antes: Swarm + Nginx + certbot + scripts de reload
-Depois: sparrow service create --domain ... --tls auto
+Antes: Swarm mais Nginx com reload manual
+Depois: sparrow service create --replicas 3 --domain app.meudominio.com
 ```
 
-### 2. Zero-downtime deploy
+Funciona hoje porque o proxy distribui por round-robin entre IPs de containers Running, sem conflito de host port.
+
+### 2. Expor API e frontend no mesmo nó
 
 ```bash
-# Sparrow faz rolling update + health check + drain automático
-sparrow service update api --image myapp/api:v2.3
-# → Sobe 1 nova réplica
-# → Proxy testa health check
-# → Se OK, adiciona ao pool
-# → Drena 1 antiga
-# → Repete até todas atualizadas
+sparrow service create --name api --image myapp/api --port 3000:3000 --domain api.meudominio.com
+sparrow service create --name web --image myapp/web --port 80:80 --domain app.meudominio.com
 ```
 
-### 3. Blue-green com proxy
-
-```yaml
-services:
-  api-blue:
-    image: myapp/api:v2.2
-    port: 3000
-    proxy:
-      domain: api.meudominio.com
-      sticky_sessions: true
-
-  api-green:
-    image: myapp/api:v2.3
-    port: 3000
-    # Sem domínio - não recebe tráfego ainda
-```
-
-```bash
-# Testar green
-sparrow proxy set-weight api-blue 0  # tira blue do ar
-sparrow proxy set-weight api-green 1 # bota green pra receber
-# → Zero-downtime switch
-```
-
-### 4. Multi-tenancy
-
-```yaml
-services:
-  cliente-a:
-    image: myapp/app
-    port: 3000
-    proxy:
-      domain: cliente-a.meudominio.com
-      tls: auto
-      rate_limit: 500/s
-      basic_auth:
-        user: admin
-        password_file: /run/secrets/cliente_a_pass
-
-  cliente-b:
-    image: myapp/app
-    port: 3000
-    proxy:
-      domain: cliente-b.meudominio.com
-      tls: auto
-      rate_limit: 100/s
-```
+O `Host` decide o destino. Sem path routing: cada domínio aponta para um serviço e uma porta alvo.
 
 ## Implementação
 
-Módulo Rust dentro do Sparrow:
+Código real em v0.9.6:
 
 ```
-src/
-├── proxy/
-│   ├── mod.rs              # inicialização do proxy
-│   ├── server.rs           # HTTP server (hyper)
-│   ├── router.rs           # roteamento host + path
-│   ├── tls.rs              # rustls + ACME
-│   ├── balancer.rs         # load balancing
-│   ├── health.rs           # health checker
-│   ├── rate_limit.rs       # token bucket
-│   ├── sticky.rs           # sticky sessions
-│   ├── middleware.rs       # logging, CORS, auth
-│   └── metrics.rs          # métricas Prometheus
+crates/
+├── api/src/proxy.rs      # ProxyService (find_route, resolve_target, forward, forward_ws)
+└── api/src/lib.rs        # AppState, ProxyRoute, rate_limit_check, metrics,
+                          # proxy_list/add/remove, start_proxy, start_api
 ```
 
-**Dependências:**
-```toml
-[dependencies]
-hyper = { version = "1", features = ["http1", "http2", "server"] }
-hyper-util = "0.1"
-rustls = "0.23"
-rustls-pemfile = "2"
-tokio-rustls = "0.26"
-acme-client = "0.2"      # Let's Encrypt
-http-body-util = "0.1"
-bytes = "1"
-pin-project-lite = "0.2"
-```
+Sem diretório `src/proxy/` com `server.rs`, `router.rs`, `tls.rs`, `balancer.rs`, `health.rs`, `rate_limit.rs`, `sticky.rs`, `middleware.rs` e `metrics.rs`. Sem `rustls`, `tokio-rustls` ou `acme-client` no workspace para o proxy. TLS existe só na API com PEM manual (`start_api`) e no Raft com mTLS (`start_mtls_raft_listener`).
 
 ## Roadmap
 
-| Fase | Feature | Previsão |
+Tudo abaixo é plano, não comportamento atual.
+
+| Fase | Feature | Estado |
 |---|---|---|
-| 1 | HTTP/1.1 + host routing + round-robin LB | Fase 2 produção |
-| 2 | HTTPS + rustls + health check | Fase 2 |
-| 3 | Let's Encrypt auto + rate limiting | Fase 3 |
-| 4 | WebSocket + gRPC + sticky sessions | Fase 3 |
-| 5 | CORS + basic auth + IP whitelist | Fase 3 |
-| 6 | HTTP/3 + PROXY protocol | Fase 4 |
-| 7 | WAF + OAuth2 | Futuro |
+| 1 | HTTP/1.1 mais host routing mais round-robin | ✅ em v0.9.6 |
+| 2 | HTTPS no proxy mais health check com dreno | Futuro |
+| 3 | Let's Encrypt auto mais rate limiting por rota | Futuro (rate-limit global já existe) |
+| 4 | gRPC mais sticky sessions | Futuro (WebSocket já existe) |
+| 5 | CORS mais basic auth mais IP whitelist | Futuro (Bearer na API já existe) |
+| 6 | HTTP/3 mais PROXY protocol | Futuro |
+| 7 | WAF mais OAuth2 | Futuro |
+
+Itens removidos da doc anterior que seguem como futuro: flags `--tls`, `--health-path`, `--sticky-sessions` e `--proxy-*`; comandos `proxy routes`, `proxy stats`, `proxy health` e `proxy set-weight`; ACME HTTP-01 com segredo `acme/<token>`; path routing (`--path /v1/*`); blue-green por peso; multi-tenancy com `rate_limit` e `basic_auth` por serviço; benchmarks RPS comparando Nginx, Caddy, Envoy e Traefik (nenhum benchmark medido no repo).

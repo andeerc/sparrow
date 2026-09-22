@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# RISK (v0.9.6, sem mudança de semântica abaixo):
+# - As units usam ProtectHome=true com User=%i: o daemon enxerga um $HOME vazio,
+#   mas config/vault vivem em $HOME/.config/sparrow (config.rs:225-236). Se o serviço
+#   parecer "zerado", confira HOME/ReadWritePaths antes de assumir perda de dados.
+# - `sparrow cluster init` NÃO é idempotente: com DBs Raft existentes ele recusa
+#   reiniciar (anti-split-brain, raft/cluster.rs:81-88). Reiniciar a unit após um
+#   init OK falha; reset exige apagar sparrow-<id>-raft-{log,sm}.db manualmente.
+# Portas (verificadas, inalteradas): API/dashboard 7443, proxy 7444 (main.rs:721),
+# MCP SSE 127.0.0.1:3000 GET /sse + POST /messages (mcp/lib.rs:92-97, cli.rs:53-66).
 set -euo pipefail
 
 USER=${1:-$(whoami)}

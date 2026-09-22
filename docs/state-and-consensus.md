@@ -231,6 +231,10 @@ Após snapshot:
 
 ## CLI
 
+> Estado real v0.9.6 (`crates/core/src/cli.rs:ClusterAction`): `cluster init`,
+> `cluster join <addr> --token`, `cluster join-token --node-id/--addr`,
+> `cluster status`, `cluster members`. Sem `cluster audit` ou `cluster election`.
+
 ```bash
 # Ver estado do cluster Raft
 sparrow cluster status
@@ -238,22 +242,7 @@ sparrow cluster status
 Cluster: prod
 Leader: node-1 (10.0.0.1:7443)
 Nodes: 3 (online)
-Term: 42
-Log index: 15389
-Last snapshot: index 15000 (3 min ago)
-Election timeout: 150-300ms
-
-# Ver log de auditoria
-sparrow cluster audit --tail 20
-INDEX TERM  TYPE        DETAIL
-15389 42    scale       web-api: 3→5 (autoscaler: cpu 85%)
-15388 42    scale       web-api: 2→3 (autoscaler: cpu 82%)
-15387 42    deploy      worker: image v1.2→v1.3 (rolling)
-15386 42    node        node-4: JOINED
-15385 41    scale       web-api: 5→2 (autoscaler: cpu 30%)
-
-# Forçar eleição (se líder suspeito)
-sparrow cluster election
+Election timeout: 1500-3000ms (`crates/raft/src/types.rs:41-48`)
 
 # Ver membros
 sparrow cluster members
@@ -261,16 +250,18 @@ sparrow cluster members
 
 ## Comparativo Raft vs etcd vs Swarm
 
-| Feature | Swarm (Raft interno) | Sparrow (raft-rs) | K8s (etcd) |
+| Feature | Swarm (Raft interno) | Sparrow (openraft) | K8s (etcd) |
 |---|---|---|---|
-| Engine | Raft (Moby) | raft-rs | etcd (Raft) |
+| Engine | Raft (Moby) | openraft 0.10-alpha.22 (`crates/raft/Cargo.toml`) | etcd (Raft) |
 | Storage | Memory + wal | SQLite + wal | bbolt + wal |
-| Snapshot | Manual | Automático | Automático |
-| Election time | ~1-3s | ~150-500ms | ~1-3s |
-| Tamanho mínimo | 3 nós | 1 nó (single-node) | 3 nós |
-| Escrita | Síncrona | Síncrona | Síncrona |
-| Leitura | Só líder | Líder + followers (SQLite) | Só líder |
-| Backup | dump manual | SQLite .backup | etcdctl snapshot |
-| Complexidade | Média | Alta (precisa implementar) | Média (usar etcd) |
+| Snapshot | Manual | Automático (openraft + applier local) | Automático |
+| Election time | ~1-3s | ~1.5-3s (1500-3000ms configurado) | ~1-3s |
+| Tamanho mínimo | 3 nós | 1 nó (single-node sem Raft) | 3 nós |
+| Escrita | Síncrona | Síncrona (líder → maioria → applier) | Síncrona |
+| Leitura | Só líder | Líder + followers (SQLite local espelhado) | Só líder |
+| Backup | dump manual | SQLite backup/vacuum (`sparrow db`) | etcdctl snapshot |
+| Complexidade | Média | Média (lib openraft, não implementação própria) | Média (usar etcd) |
 
-> **Nota**: Para v1 do Sparrow, considerar usar uma lib raft em vez de implementar do zero. Opções: `raft-rs` (Tikv), `openraft`, ou embutir `etcd` como sidecar.
+> **Nota v0.9.6**: decisão de engine já tomada — openraft em uso (`crates/raft/src/`).
+> A frase original ("considerar usar uma lib raft em vez de implementar do zero")
+> é pré-projeto e está preservada só neste adendo como histórico.

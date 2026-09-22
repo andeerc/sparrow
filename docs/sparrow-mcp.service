@@ -6,6 +6,11 @@ BindsTo=sparrow.service
 
 [Service]
 Type=simple
+# RISK: ProtectHome=true esconde o $HOME real do usuário da unit (User=%i) —
+# o MCP resolve StateStore/vault via data_dir + config em $HOME/.config/sparrow
+# (main.rs:26-43 SUDO_USER/HOME, config.rs:225-236); se o banco parecer vazio,
+# verifique ReadWritePaths/HOME antes de assumir perda de dados. Semântica do
+# ExecStart inalterada: SSE em 127.0.0.1:3000, endpoints GET /sse + POST /messages.
 ExecStart=/usr/local/bin/sparrow mcp --host 127.0.0.1 --port 3000
 Restart=on-failure
 RestartSec=5

@@ -1,169 +1,93 @@
 # Networking
 
-## Arquitetura de Rede
+> v0.9.6 — descreve o que o código faz hoje. Tudo que é plano está marcado
+> `FUTURO` na seção [Roadmap](#roadmap-futuro--não-implementado).
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Sparrow Cluster                         │
-│                                                             │
-│  ┌───────────┐    ┌───────────┐    ┌───────────┐          │
-│  │  Node A   │    │  Node B   │    │  Node C   │          │
-│  │           │    │           │    │           │          │
-│  │ ┌───────┐ │    │ ┌───────┐ │    │ ┌───────┐ │          │
-│  │ │ wg0   │◄┼────┼─│ wg0   │◄┼────┼─│ wg0   │ │          │
-│  │ │10.0.0.1│ │    │ │10.0.0.2│ │    │ │10.0.0.3│ │          │
-│  │ └───────┘ │    │ └───────┘ │    │ └───────┘ │          │
-│  │           │    │           │    │           │          │
-│  │ ┌───────┐ │    │ ┌───────┐ │    │ ┌───────┐ │          │
-│  │ │svc-web│ │    │ │svc-web│ │    │ │svc-web│ │          │
-│  │ │10.0.1.2│ │    │ │10.0.1.3│ │    │ │10.0.1.4│ │          │
-│  │ └───────┘ │    │ └───────┘ │    │ └───────┘ │          │
-│  │ ┌───────┐ │    │ ┌───────┐ │    │           │          │
-│  │ │svc-db │ │    │ │svc-db │ │    │           │          │
-│  │ │10.0.2.2│ │    │ │10.0.2.3│ │    │           │          │
-│  │ └───────┘ │    │ └───────┘ │    │           │          │
-│  └───────────┘    └───────────┘    └───────────┘          │
-│                                                             │
-│  ┌──────────────── DNS (CoreDNS embutido) ───────────────┐ │
-│  │ web.svc.sparrow → 10.0.1.2, 10.0.1.3, 10.0.1.4       │ │
-│  │ db.svc.sparrow  → 10.0.2.2, 10.0.2.3                  │ │
-│  └────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-```
+## O que existe hoje
 
-## Camadas
-
-### 1. Wireguard Overlay (nó a nó)
-
-Cada nó do cluster tem um túnel Wireguard para cada outro nó:
-
-```
-Node A (eth0: 192.168.1.10) ←→ Wireguard ←→ Node B (eth0: 192.168.1.11)
-            ↓                                ↓
-      wg0: 10.0.0.1                    wg0: 10.0.0.2
-```
-
-- Porta: 51820/udp
-- Criptografia: ChaCha20-Poly1305
-- Chave privada gerada no `cluster init`
-- Peer descoberta automática via membership
-
-### 2. Service Network (pod a pod)
-
-Cada serviço ganha um CIDR /24 dentro do overlay:
-
-```
-Service CIDR: 10.0.0.0/16
-├── web-api:  10.0.1.0/24
-│   ├── web-1: 10.0.1.2
-│   ├── web-2: 10.0.1.3
-│   └── web-3: 10.0.1.4
-├── worker:   10.0.2.0/24
-│   ├── wrk-1: 10.0.2.2
-│   ├── wrk-2: 10.0.2.3
-│   └── wrk-3: 10.0.2.4
-└── redis:    10.0.3.0/24
-    └── redis-1: 10.0.3.2
-```
-
-### 3. Service Discovery (DNS)
-
-DNS interno baseado em CoreDNS ou equivalente leve:
-
-```
-web-api.svc.sparrow       → 10.0.1.2, 10.0.1.3, 10.0.1.4 (A)
-web-api.svc.sparrow       → SRV registro com portas
-web-api-1.svc.sparrow     → 10.0.1.2 (DNS específico por réplica)
-
-db.svc.sparrow            → 10.0.2.2, 10.0.2.3
-```
-
-Resolução automática — containers se descobrem pelo nome do serviço.
-
-### 4. Load Balancing
-
-Proxy interno (iptables/nftables) distribui tráfego entre réplicas:
-
-```
-web-api.svc.sparrow:80
-       │
-       ▼
-  ┌──────────┐
-  │  Proxy   │  (iptables DNAT + balanceamento round-robin)
-  └────┬─────┘
-       │
-  ┌────┼────┐
-  ▼    ▼    ▼
-web-1 web-2 web-3
-:80   :80   :80
-```
-
-**Estratégias de LB:**
-- Round-robin (padrão)
-- Least connections
-- IP hash (sticky sessions)
-
-### 5. Port Publishing
-
-```
-sparrow service create --port 80:80 --port 443:443
-
-Publish modes:
-├── ingress (padrão): exposto em todos os nós
-│   → qualquer nó:80 → container correto
-│
-├── host: só no nó que roda o container
-│   → precisa saber qual nó
-│
-└── dns: via DNS round-robin
-    → resolve para IPs dos nós que têm o container
-```
-
-**Exemplo ingress:**
-```
-Usuário → DNS → 192.168.1.10 (Node A):80
-                    → iptables DNAT
-                    → 10.0.1.3 (web-2 no Node C)
-                    → via Wireguard tunnel
-```
-
-## Comandos
+Três subcomandos, só repasse ao Podman (`src/main.rs:1568-1618`):
 
 ```bash
-# Criar rede overlay
-sparrow network create --driver overlay --subnet 10.0.5.0/24 mynet
-
-# Listar
-sparrow network ls
-NAME      DRIVER    CIDR           SERVICES
-overlay   wireguard 10.0.0.0/16    -
-mynet     overlay   10.0.5.0/24    (empty)
-
-# Conectar serviço
-sparrow network connect mynet web-api
-
-# Ver detalhes
-sparrow network inspect mynet
-Name: mynet
-CIDR: 10.0.5.0/24
-Gateway: 10.0.5.1
-Services:
-  - web-api (10.0.5.2, 10.0.5.3, 10.0.5.4)
-
-# DNS lookup
-sparrow network dns mynet
-web-api.mynet.sparrow → 10.0.5.2, 10.0.5.3, 10.0.5.4
+sparrow network create <name> [--subnet 10.88.0.0/16]
+sparrow network ls        # alias: list
+sparrow network rm <name>
 ```
+
+- `create`: executa `podman network create --subnet <subnet|10.88.0.0/16> <name>`.
+- `ls`: executa `podman network ls --format "{{.Name}}\t{{.Driver}}\t{{.Subnet}}"`.
+- `rm`: executa `podman network rm <name>`.
+- Serviços usam a rede via `run_container --network <name>`
+  (`crates/podman/src/runtime.rs:90-92`); o CLI aceita `--network <name>` e
+  grava em `spec.networks` (`src/main.rs:1024-1026`).
+
+Exemplo real:
+
+```bash
+sparrow network create mynet --subnet 10.88.0.0/16
+sparrow service create --name web --image nginx --replicas 1 --network mynet
+```
+
+Não há driver overlay próprio, CIDR por serviço, gateway impresso, DNS
+interno, service discovery por nome, load balancing gerenciado, publish modes
+(`ingress|host|dns`), `network connect/inspect/dns`, nem descoberta de peers.
+Nomes de rede são strings opacas repassadas ao Podman — qualquer driver que o
+Podman local suporte funciona, mas o Sparrow não provisiona nem garante nada
+além de chamar o CLI.
+
+## Wireguard: helpers sem chamadores
+
+`crates/core/src/network.rs` — `WireguardManager` com `generate_keys()` (via
+`wg genkey/pubkey`), `write_config()` (gera `[Interface]/[Peer]` com
+`PersistentKeepalive = 25`) e `up()/down()` (via `wg-quick`). Nenhum comando,
+daemon, applier ou outro módulo chama essas funções (`grep WireguardManager::
+generate_keys|write_config` em `crates/ src/` retorna só a definição).
+Não existe túnel `wg0`, subnet `10.0.0.0/16`, porta `51820/udp`, troca de
+chaves no `cluster init` nem descoberta de peers via membership. Tudo isso é
+`FUTURO` (ver Roadmap).
+
+## O que o proxy faz (único "LB" real)
+
+O proxy reverso HTTP na porta 7444 (`crates/api/src/proxy.rs`):
+
+1. `find_route(Host)` — match exato de domínio (sem `:porta`) contra
+   `proxy_routes` (SQLite primeiro, cache em memória depois).
+2. `resolve_target(route)` — IPs via `get_active_container_ips()` (ou cache)
+   e escolha **round-robin** por `service_name`. Sem IPs →
+   fallback `127.0.0.1:target_port`.
+3. `forward` / `forward_ws` — HTTP e WebSocket para
+   `http(s)://{ip}:{target_port}{uri}` com `x-forwarded-*`.
+
+Sem least-connections, IP-hash/sticky sessions, DNAT via iptables/nftables,
+health checks ativos ou publish modes. Para expor um serviço multi-réplica,
+crie a rota por domínio (`--domain` no `service create` ou
+`POST /api/v1/proxy/routes`) em vez de publicar host-port por réplica
+(a regra host-port × réplicas>1 aborta — `src/main.rs:390-397`).
 
 ## Comparativo
 
-| Feature | Swarm | Sparrow |
+| Feature | Swarm | Sparrow (real) |
 |---|---|---|
-| Overlay driver | VXLAN | Wireguard |
-| Criptografia | IPSec (opcional) | Obrigatória (WG) |
-| Service discovery | DNS embutido | DNS + SRV |
-| Load balancing | IPVS | iptables/nftables |
-| Sticky sessions | ✅ | ✅ |
-| Rede por serviço | ✅ | ✅ |
-| CIDR configurável | ✅ | ✅ |
-| Múltiplos networks | ✅ | ✅ |
+| Overlay driver | VXLAN | ❌ — nomes repassados ao Podman (`--network`) |
+| Criptografia entre nós | IPSec (opcional) | ❌ — Raft usa mTLS; sem overlay criptografado (`FUTURO`: Wireguard) |
+| Service discovery | DNS embutido | ❌ — sem DNS/CoreDNS/SRV (`FUTURO`) |
+| Load balancing | IPVS | Parcial — só proxy HTTP 7444, round-robin por domínio |
+| Sticky sessions | ✅ | ❌ (`FUTURO`) |
+| Rede por serviço (CIDR) | ✅ | ❌ — sem CIDR por serviço (`FUTURO`) |
+| CIDR configurável | ✅ | Parcial — só `--subnet` repassado ao `podman network create` |
+| Múltiplos networks | ✅ | Parcial — via Podman, sem `connect/inspect` no Sparrow |
+
+## Roadmap (`FUTURO` — não implementado)
+
+Versões anteriores deste doc descreviam o seguinte no presente; hoje é plano:
+
+- `FUTURO` Overlay Wireguard nó-a-nó (`wg0`, `10.0.0.x`, `51820/udp`,
+  ChaCha20-Poly1305, peers via membership).
+- `FUTURO` Service network com CIDR `/24` por serviço (`10.0.0.0/16` raiz,
+  IPs `.2/.3/.4` por réplica).
+- `FUTURO` Service discovery DNS (`*.svc.sparrow`, registros A/SRV, lookup
+  por réplica, CoreDNS embutido).
+- `FUTURO` Load balancing interno (iptables/nftables DNAT, least-conn,
+  IP-hash/sticky).
+- `FUTURO` Publish modes (`ingress|host|dns`) e roteamento via túnel.
+- `FUTURO` Comandos `network create --driver overlay`, `network connect`,
+  `network inspect`, `network dns` e saídas com `CIDR/Gateway/Services`.

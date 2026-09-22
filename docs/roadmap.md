@@ -51,10 +51,16 @@ Orquestrador de containers que qualquer dev consegue operar. Sem engenharia de p
 
 1. **Rust, não Go** — performance, segurança de memória, binário menor
 2. **Podman, não Docker** — rootless, daemonless, systemd integration
-3. **Auto-scaling real** — não só CPU, mas request rate, queue, schedule, preditivo
-4. **mTLS obrigatório** — segurança por padrão, não opcional
-5. **Wireguard overlay** — criptografado por padrão, performance superior a VXLAN
-6. **Binário único** — sem dependências externas (nem Docker, só Podman)
+3. **Auto-scaling real [futuro]** — hoje só CPU/memória via `podman stats` (loop 30 s,
+   `core/autoscale.rs`); request rate, queue, schedule e preditivo são roadmap
+4. **mTLS [futuro: obrigatório]** — hoje o Raft usa mTLS quando clusterizado e a API
+   só fala TLS com `tls_cert`/`tls_key` configurados (`api/lib.rs:305-315`); tornar
+   mTLS obrigatório em todo o plano de controle é roadmap
+5. **Wireguard overlay [futuro]** — `WireguardManager` (`core/network.rs`) é só um
+   gerador de config sem chamadores em v0.9.6; overlay criptografado por padrão é roadmap
+6. **Binário único [futuro: sem deps externas]** — hoje o runtime shella para o binário
+   `podman` (`PodmanRuntime::check_available`/`run_container`) e o overlay exige `wg`;
+   eliminar dependências externas é roadmap
 
 ## Riscos
 
@@ -63,7 +69,7 @@ Orquestrador de containers que qualquer dev consegue operar. Sem engenharia de p
 | Podman tem limitações rootless (portas <1024, NFS) | Documentar limitações, fallback pra rootful |
 | Wireguard não escala como VXLAN (O(n²) túneis) | Para <50 nós é aceitável. Depois: VXLAN |
 | Mercado dominado por K8s | Foco em nicho: times pequenos, edge, homelab |
-| Raft complexo de implementar | Usar raft-rs (Tikv) ou OpenRaft |
+| Raft complexo de implementar | Resolvido em v0.9.6 com OpenRaft 0.10-alpha.22 (`crates/raft/Cargo.toml`); risco residual é operação (split-brain em reset manual, eleição 1500–3000 ms) |
 | Podman remote API é instável | Abstrair runtime: Podman + containerd + Docker |
 
 ## Monetização (se aplicável)

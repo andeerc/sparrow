@@ -18,7 +18,7 @@ Swarm (morto)                    K8s (complexo)
 ## Stack
 
 | Camada | Tecnologia |
-|---|---|---|
+|---|---|
 | Linguagem | Rust (2021 edition) |
 | Runtime | Podman (daemonless, rootless) |
 | Cluster | Raft (openraft) |

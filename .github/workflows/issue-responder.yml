@@ -29,31 +29,47 @@ jobs:
 
       - name: Prepare prompt
         id: prompt
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER_IN: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          if [ "${{ github.event_name }}" = "issues" ]; then
-            echo "PROMPT<<EOF" >> $GITHUB_ENV
-            echo "Issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}" >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            echo "${{ github.event.issue.body }}" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+          delimiter="PROMPT_EOF_${RANDOM}${RANDOM}"
+          if [ "$EVENT_NAME" = "issues" ]; then
+            {
+              echo "PROMPT<<$delimiter"
+              echo "Issue #$ISSUE_NUMBER_IN: $ISSUE_TITLE"
+              echo ""
+              echo "$ISSUE_BODY"
+              echo "$delimiter"
+            } >> "$GITHUB_ENV"
+            echo "ISSUE_NUMBER=$ISSUE_NUMBER_IN" >> "$GITHUB_ENV"
           else
-            echo "PROMPT<<EOF" >> $GITHUB_ENV
-            echo "@opencode foi mencionado no issue #${{ github.event.issue.number }}" >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            echo "Comentário:" >> $GITHUB_ENV
-            echo "${{ github.event.comment.body }}" >> $GITHUB_ENV
-            echo "" >> $GITHUB_ENV
-            echo "Responda como um desenvolvedor Rust senior, ajudando com código e arquitetura." >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+            {
+              echo "PROMPT<<$delimiter"
+              echo "@opencode foi mencionado no issue #$ISSUE_NUMBER_IN"
+              echo ""
+              echo "Comentário:"
+              echo "$COMMENT_BODY"
+              echo ""
+              echo "Responda como um desenvolvedor Rust senior, ajudando com código e arquitetura."
+              echo "$delimiter"
+            } >> "$GITHUB_ENV"
+            echo "ISSUE_NUMBER=$ISSUE_NUMBER_IN" >> "$GITHUB_ENV"
           fi
 
       - name: Run OpenCode
         id: opencode
         run: |
           echo "$PROMPT" | opencode run --agent build --model opencode-go/deepseek-v4-flash --format json > response.json 2>&1 || true
-          echo "RESPONSE=$(cat response.json | jq -r '.text // . // empty')" >> $GITHUB_ENV
+          delimiter="RESPONSE_EOF_${RANDOM}${RANDOM}"
+          {
+            echo "RESPONSE<<$delimiter"
+            jq -r '.text // . // empty' response.json
+            echo "$delimiter"
+          } >> "$GITHUB_ENV"
 
       - name: Post comment
         if: env.RESPONSE != ''
